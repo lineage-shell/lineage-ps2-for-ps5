@@ -200,8 +200,12 @@ static void notify_tile(const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
+#ifdef HELPER_QUIET
+    say("notify (quiet build, not shown): %s", msg);
+#else
     if (switch_tile_notices_on()) notify("%s", msg);
     else say("notify (about the tiles, not shown: switch.txt is 0): %s", msg);
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -539,7 +543,11 @@ static void launch(const char *serial, const char *iso) {
     fprintf(f, "%s\n%s\n", iso, serial);
     fclose(f);
     say("launch %s: %s (PS5SX2 %s)", serial, iso, alive ? "running" : "not running");
+#ifdef HELPER_QUIET
+    say("notify (quiet build, not shown)");
+#else
     notify("PS5SX2: starting %s", serial);
+#endif
     if (alive) {
         /* Its disc watcher sees the exec signal and re-execs into the game; then LaunchApp brings it to the
          * front (the re-exec keeps the shell's focus where it was). */
@@ -1323,7 +1331,11 @@ static int disc_auto_loop(void) {
     load_lnc();
     switch_ensure_file(); /* /data/PCSX2/switch.txt, 0 or 1: the notifications about the disc tiles (see disc_switch.h); written with 0 when it is not there */
 
+#ifdef HELPER_QUIET
+    say("notify (quiet build, not shown)");
+#else
     notify("PS5SX2 disc-auto running: put a PS2 DVD in");
+#endif
 #ifdef DISC_AUTO_EMBEDDED
     ds8_start(); /* 171j: DiscSpeed8 - patch SceShellCore so every setSpeed is 8.0 and pin the drive to 8x every 60 s (flag disc_nospeed8 turns it off) */
 #endif

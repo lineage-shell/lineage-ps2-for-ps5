@@ -82,6 +82,9 @@ static void write_helper_status(void); /* 179: forward decl; defined lower, used
 #define MAX_DRIVES 4
 #define NSLOTS     8
 #define POLL_US    250000
+#ifdef HELPER_QUIET
+#define PAYLOAD_REV "171p-q" /* 171p-q = 171p with no success notifications (no tile notes, no start-up line; errors still notify) and no "Jailbroken!" popup. */
+#else
 #define PAYLOAD_REV "171p" /* written in the log's first line, so that a log says which payload made it: 171p = 171o + the no-mount helper's clean-up of stale sandboxes takes no mount off and never touches PS5SX2's own (it took /data away from every later PS5SX2 start until a restart), the other helper's only after ShadowMount+ said busy for 60 s with no app running, no clean-up at an uninstall's 409, the DiscSpeed8 pin quiet while the console shuts down or rests and asking the drive once a minute, read_serial's NUL kept inside its 16-byte buffer; 171o =171n without the PS2 badge in the names (the owner: it was to replace the platform badge, which the home screen has no PS2 value for; the badge 171n put in the names of PS5SX2's own tiles is taken back out, flag disctile_nobadge); 171n = 171m + no Reload tile (off unless the flag disctile_reload; one that is there is taken away) and the PS2 badge (U+F8BC) in front of every PS5SX2 tile's name (new tiles from their param.json; the names already on the home screen in app.db, appinfo.db and the param.json copies, flag disctile_nobadge); 171m = 171l + the Reload tile switched from PS5SX2's settings (the flag disctile_noreload looked at every 3 s while running: made -> the tile taken away at once, deleted -> made again; the seen mark forgotten whenever the flag takes the tile away, so switching it back on is not taken for a removal by the person); 171l = 171k + the Reload tile removed by the person stays removed (flag disctile_noreload made for them), DiscSpeed8's shell patch on fw 11.40 only (flag disc_speed8_anyfw) and every detach of the shell checked (never left traced or stopped); 171k = 171j + next to the PS5SX3 helper (disc_compat.h: a drive with a disc that is not a PS2 disc is left alone until the disc goes - not opened, not asked, not pinned to 8x - and ps5sx2-helper.txt says so (compat=1, cd0..cd3=, usb=), so that the PS5SX3 helper takes the drive without stopping this one; the system's disc tile put back at a stop only for a PS2 disc; a removed tile's concept rows that another title uses stay; flag disc_noyield = 171j's way); 171j = 171i + DiscSpeed8 SceShellCore 8x patch and 60 s drive pin (disc_speed8.c; flag disc_nospeed8), game tiles ON by default (gametile_off switches off); 171i = 171h + the flag kp_log looked at every 10 s (not only at the start); 171h = disc speed (the copies of disc_launch.c read in bigger pieces, a drive the watcher reads is not opened here, every 3 s while PS5SX2 copies), 171 = the first reload build, 171b = cover/art refresh on reload, clean slots first,
                             * tile-gone timing; 171c = the Reload tile kept next to the disc tile, the uninstall on its own thread asked every 0.4 s, half a second of debounce at eject;
                             * 171d = a tile's game closed when its disc goes out, the leftover database rows of a removed tile deleted, concept rows for the order, a title card when there is no cover;
@@ -91,6 +94,7 @@ static void write_helper_status(void); /* 179: forward decl; defined lower, used
                             * jb/mount patches on; game quiet (kp.c: while PS5SX2 plays from a drive each drive is looked at once per 3 s; flag gamequiet_off); the game of a tile whose
                             * disc is out is still closed when the log files are off (ShadowMount+'s log is asked through its API); the tile code is as in 171e;
                             * 171g = game tiles (gametile.c, hosted builds only, off unless the flag gametiles exists); the disc code is as in 171f */
+#endif
 
 /* 2.05: the "Reload PS2 disc" tile, a permanent one next to the disc tiles (PPSA99231..38). Pressing it starts PS5SX2's eboot (build 171+), which
  * only leaves a note (RELOAD_REQ) and closes at once; this payload then cleans up, asks ShadowMount+ to scan again and makes the tiles afresh. */
@@ -159,8 +163,12 @@ static void notify_tile(const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
+#ifdef HELPER_QUIET
+    say("notify (quiet build, not shown): %s", msg);
+#else
     if (switch_tile_notices_on()) notify("%s", msg);
     else say("notify (about the tiles, not shown: switch.txt is 0): %s", msg);
+#endif
 }
 
 static int flag(const char *name) {

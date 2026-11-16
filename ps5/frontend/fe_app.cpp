@@ -7,6 +7,7 @@
 #include "fe_i18n.h"
 #include "fe_roots.h" // 2026-10-16: kScanSubfoldersKey (the picker's game count)
 #include "fe_settings.h" // bioscheck: EditSettingsFile (the BIOS question writes PS5SX2/OpenBios)
+#include "fe_ps2.h" // ps2-console-shelf: the PS2 look
 
 #include <algorithm>
 #include <cctype>
@@ -25,26 +26,27 @@ namespace fe
 {
 namespace
 {
-// The camera and the shelf's layout (world units: 1 = 100 mm).
-const Vec3 kEye(0.0f, 0.30f, 7.8f);
-const Vec3 kTarget(0.0f, -0.16f, 0.0f);
-constexpr float kFovY = 30.0f;
-constexpr float kFloorY = -kBoxHalfH;
 // fe_coverfit.h makes a cover the shape of the case face it goes on: the faces of the box mesh (fe_renderer.cpp CreateBoxMesh) must be the shape it assumes.
 static_assert(kFaceAspectFront - kBoxHalfW / kBoxHalfH < 0.001f && kBoxHalfW / kBoxHalfH - kFaceAspectFront < 0.001f, "front/back face shape");
 static_assert(kFaceAspectSpine - kBoxHalfD / kBoxHalfH < 0.001f && kBoxHalfD / kBoxHalfH - kFaceAspectSpine < 0.001f, "spine face shape");
-constexpr float kCenterZ = 1.05f;   // the selected case, pulled forward
-constexpr float kSideX = 1.86f;     // the first neighbour's centre
-constexpr float kStepX = 0.56f;     // each further one
-constexpr float kSideZ = -0.55f;
-constexpr float kStepZ = 0.10f;
-constexpr float kSideTurn = 58.0f;  // degrees the neighbours turn towards the centre
-constexpr int kVisible = 7;         // cases drawn on each side
 // 2026-10-10 (AI-assisted; a tester with ~2,600 NFS games had no covers): textures only for the games near the selection.
 // Every game used to keep a spine, a placeholder and a cover (~2.7 MB): gigabytes for a large library, and past ~1,020
 // games the renderer's descriptor pool (1,024 sets) ran out, so boxes weren't drawn. Needs proper testing on the console.
-constexpr int kCoverKeep = 24; // games within this many places of the selection are asked for
-constexpr int kCoverDrop = 32; // and dropped beyond this many (from the selection and the scroll), so going back and forth doesn't repaint
+constexpr int kCoverKeep = 30; // games within this many places of the selection are asked for (ps2-console-shelf: 24 before; the grid shows ~24)
+constexpr int kCoverDrop = 40; // and dropped beyond this many (from the selection and the scroll), so going back and forth doesn't repaint
+// ps2-console-shelf (AI-assisted): the Library's grid (fe_ps2ui_impl.h): six columns, three rows in view.
+constexpr int kGridCols = 6;
+constexpr int kGridRowsShown = 3;
+constexpr double kSheetOut = 1.3;  // P2-23: the sheet's field leaving, back to Home (its entry, 1.3 s, backwards)
+constexpr double kSheetBack = 1.9; // P2-23: ... and Home's words up again by then
+constexpr double kScreenOut = 0.22; // P2-02: seconds the old screen takes to fade out (the new one takes kScreenIn to come up)
+constexpr float kScreenIn = 0.32f;
+// P2-26: the PS2 Browser's page change, measured at 25 fps (yt 1G4yRe288Os, 1:18 and 1:32): the picked object tips back and flies at the
+// eye in 0.36 s, its bloom gone by 0.12 s and the words by 0.16 s; the page's items then grow from points, 0.2 s each. Back: the items
+// shrink to points in 0.16 s, the field stays empty 0.28 s, then the object flies back out in 0.36 s and its bloom comes up.
+constexpr double kZoomFly = 0.36;
+constexpr double kZoomShrink = 0.16;
+constexpr double kZoomGap = 0.44;
 
 // 2.11 (swordpdf: "back covers are not loading instantly"): when the picked case's back cover is asked for. The files on disk after 0.20 s of being picked,
 // which is above the 0.11 s a held D-pad steps at (Step runs before PollCovers in a frame), so scrolling never starts a lookup; the network after 0.35 s, or
@@ -65,15 +67,6 @@ constexpr double kBackGrace = 0.20;
 constexpr float kFlipDead = 0.35f, kFlipFull = 0.95f, kFlipCurve = 2.2f;
 constexpr float kFlipSpring = 60.0f, kFlipDamping = 0.85f, kFlipMaxSpeed = 2.6f;
 
-// 2.11 (swordpdf: "proportionate to the case"): the disc drawn on a case front, to the case scale: the front is 135 mm wide and a PS2 disc is 120 mm
-// across, so its circle is most of the front's width (the loading arc goes round it, the percentage and the captions under it).
-constexpr float kDiscRadius = 0.54f, kDiscCy = 0.17f;
-constexpr float kDiscTextY = kDiscCy - kDiscRadius - 0.17f; // the text's centre: clear of the disc's lower edge, above the serial at the foot
-
-// The author's handles, under the wordmark (vk-285-50, the user's request).
-constexpr const char* kDiscordHandle = "sword.pdf";
-constexpr const char* kXHandle = "@sword_pdf";
-
 uint32_t Rgba(float r, float g, float b, float a = 1.0f)
 {
 	auto c = [](float v) { return static_cast<uint32_t>(Clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
@@ -92,90 +85,6 @@ constexpr int kDumpIndex = -1;
 // 2.11: the disc in the drive, not copied: a shelf entry too, in front of everything (an index below kDumpIndex: both are never up at once).
 constexpr int kDriveIndex = -2;
 
-// live-22 (AI-assisted, graphics approach from the dropped frontend of PR #34): a spinning disc drawn on the front of a box
-// (model `model`), as UI triangles whose corners are the box's front points projected, so it lies on the box at any angle.
-// `alpha` fades it on the boxes beside the selected one. Here it marks the game currently being dumped; the percentage is
-// drawn over it by Build.
-void AddDiscSpinner(std::vector<UiVertex>& ui, const Mat4& view_proj, const Mat4& model, float t, float alpha, float W, float H, bool with_disc = true,
-	bool with_arc = true)
-{
-	if (alpha <= 0.01f)
-		return;
-	constexpr int kSegments = 72;
-	constexpr float kPi = 3.14159265f;
-	const float cx = 0.0f, cy = kDiscCy, z = kBoxHalfD + 0.004f; // a little above centre; the percentage sits below it
-	const float s = kDiscRadius / 0.40f; // the radii below were drawn for a disc of 0.40
-	auto put = [&](float r, float a, uint32_t color) {
-		const Vec4 w = model * Vec4(cx + r * std::cos(a), cy + r * std::sin(a), z, 1.0f);
-		const Vec4 c = view_proj * w;
-		UiVertex v = {((c.x / c.w) * 0.5f + 0.5f) * W, ((c.y / c.w) * 0.5f + 0.5f) * H, 0, 0, color, 1e5f, 1e5f, 0, 1};
-		return v;
-	};
-	auto ring = [&](float r0, float r1, float from, float to, const auto& colour) {
-		const int n = std::max(2, static_cast<int>(kSegments * (to - from) / (2 * kPi)));
-		for (int k = 0; k < n; k++)
-		{
-			const float a0 = from + (to - from) * k / n, a1 = from + (to - from) * (k + 1) / n;
-			const UiVertex p0 = put(r0, a0, colour(a0, 0.0f)), p1 = put(r1, a0, colour(a0, 1.0f));
-			const UiVertex p2 = put(r1, a1, colour(a1, 1.0f)), p3 = put(r0, a1, colour(a1, 0.0f));
-			ui.insert(ui.end(), {p0, p1, p2, p0, p2, p3});
-		}
-	};
-	const float spin = t * 5.0f;
-	const auto a8 = [&](float a) { return static_cast<uint32_t>(Clamp(a, 0.0f, 1.0f) * 255.0f + 0.5f) << 24; };
-	// The disc: silver with two glints that turn with it and a faint rainbow, the clear hub, and the hole. (2.11: not when the disc's own art is drawn.)
-	if (with_disc)
-	ring(0.13f * s, 0.40f * s, 0.0f, 2 * kPi, [&](float a, float outer) {
-		const float g1 = std::pow(std::max(0.0f, std::cos(a - spin)), 10.0f), g2 = std::pow(std::max(0.0f, std::cos(a - spin - kPi)), 10.0f);
-		const float glint = 0.55f * (g1 + g2) * (0.6f + 0.4f * outer);
-		const float hue = a * 2.0f - spin;
-		const float r = 0.62f + 0.10f * std::sin(hue) + glint, g = 0.64f + 0.10f * std::sin(hue + 2.1f) + glint,
-					bl = 0.72f + 0.10f * std::sin(hue + 4.2f) + glint;
-		return a8(alpha * 0.92f) | Rgba(Clamp(r, 0.0f, 1.0f), Clamp(g, 0.0f, 1.0f), Clamp(bl, 0.0f, 1.0f), 0);
-	});
-	if (with_disc)
-	ring(0.055f * s, 0.13f * s, 0.0f, 2 * kPi, [&](float, float) { return a8(alpha * 0.55f) | Rgba(0.85f, 0.88f, 0.95f, 0); });
-	// The loading arc around it, a quarter turn long, going round faster than the disc.
-	const float head = t * 3.2f;
-	if (with_arc)
-	ring(0.44f * s, 0.465f * s, head, head + kPi * 0.6f, [&](float a, float) {
-		const float tail = (a - head) / (kPi * 0.6f);
-		return a8(alpha * (0.15f + 0.85f * tail)) | Rgba(1.0f, 1.0f, 1.0f, 0);
-	});
-}
-
-// 2.11 (AI-assisted; swordpdf: "we can also use the circular disc cover for when a game is dumping"): the disc's own art, a picture with a round label and a
-// transparent surround, turned by `angle` about the disc's centre on the box front. A grid of small quads whose corners are the box's front points
-// projected (the UI shader has no perspective correction, so a few cells keep the picture from swimming when the box is at an angle). `images` gets
-// the texture change for them (the renderer binds `set` for those vertices).
-void AddDiscArt(std::vector<UiVertex>& ui, std::vector<UiImageRange>& images, VkDescriptorSet set, float aspect, const Mat4& view_proj, const Mat4& model,
-	float angle, float alpha, float W, float H)
-{
-	if (alpha <= 0.01f || !set)
-		return;
-	constexpr int kGrid = 8;
-	const float cx = 0.0f, cy = kDiscCy, z = kBoxHalfD + 0.0035f, radius = kDiscRadius; // as the spinner's disc
-	const float hw = aspect >= 1.0f ? radius : radius * aspect, hh = aspect >= 1.0f ? radius / aspect : radius;
-	const float ca = std::cos(angle), sa = std::sin(angle);
-	const uint32_t colour = Rgba(1.0f, 1.0f, 1.0f, Clamp(alpha, 0.0f, 1.0f));
-	auto vert = [&](float s, float tt) {
-		const float lx = (s - 0.5f) * 2.0f * hw, ly = (0.5f - tt) * 2.0f * hh; // the picture's top is up on the box
-		const Vec4 w = model * Vec4(cx + lx * ca - ly * sa, cy + lx * sa + ly * ca, z, 1.0f);
-		const Vec4 c = view_proj * w;
-		return UiVertex{((c.x / c.w) * 0.5f + 0.5f) * W, ((c.y / c.w) * 0.5f + 0.5f) * H, s, tt, colour, 0, 0, 0, 2};
-	};
-	const uint32_t first = static_cast<uint32_t>(ui.size());
-	for (int gy = 0; gy < kGrid; gy++)
-		for (int gx = 0; gx < kGrid; gx++)
-		{
-			const float s0 = static_cast<float>(gx) / kGrid, s1 = static_cast<float>(gx + 1) / kGrid;
-			const float t0 = static_cast<float>(gy) / kGrid, t1 = static_cast<float>(gy + 1) / kGrid;
-			const UiVertex a = vert(s0, t0), b = vert(s1, t0), c = vert(s1, t1), d = vert(s0, t1);
-			ui.insert(ui.end(), {a, b, c, a, c, d});
-		}
-	images.push_back({first, static_cast<uint32_t>(ui.size()) - first, set});
-}
-
 // vk-285-114: multiplies the alpha of UI vertices [begin, end) by `f` (what the options sheet covers fades out).
 void FadeRange(std::vector<UiVertex>& ui, size_t begin, size_t end, float f)
 {
@@ -189,17 +98,10 @@ void FadeRange(std::vector<UiVertex>& ui, size_t begin, size_t end, float f)
 	}
 }
 
-// Screen position (0..1) of a world point.
-Vec2 Project(const Mat4& view_proj, const Vec3& p)
-{
-	const Vec4 c = view_proj * Vec4(p.x, p.y, p.z, 1.0f);
-	Vec2 out;
-	out.x = (c.x / c.w) * 0.5f + 0.5f;
-	out.y = (c.y / c.w) * 0.5f + 0.5f;
-	return out;
-}
-
 std::string Fit(const Fonts& fonts, std::string text, float px, float width); // below; vk-285-134: Build uses it too
+// ps2-console-shelf (AI-assisted): fe_ps2ui_impl.h, at the end of this file.
+void Ps2Camera(FrameDesc& f, float W, float H);
+std::vector<std::string> Wrap(const Fonts& fonts, const std::string& text, float px, float width, int max_lines); // below
 } // namespace
 
 bool App::Init(Renderer* renderer, const Fonts* fonts, std::vector<GameInfo> games, CoverService* covers, const AppConfig& cfg)
@@ -227,6 +129,40 @@ bool App::Init(Renderer* renderer, const Fonts* fonts, std::vector<GameInfo> gam
 				m_show_hidden ? " (shown, dimmed: Show hidden games is on)" : "");
 	}
 	m_scroll = static_cast<float>(m_selected);
+	// ps2-console-shelf (AI-assisted): the PS2 flow starts on the Home screen; coming back from a game (L1 + R1 + Touch) it plays the boot
+	// towers, built from the play history, and opens the Library on the last game.
+	RebuildSources();
+	if (!cfg.returning && !m_games.empty())
+		m_selected = 0, m_scroll = 0; // shelf v3: a new session opens the Library at the top (kurolume); back from a game, on that game
+	m_grid_target = std::max(0, m_selected / 6 - 1);
+	m_grid_scroll = static_cast<float>(m_grid_target);
+	m_screen = (cfg.returning && !m_games.empty()) || cfg.start_library ? Screen::Library : Screen::Home;
+	m_continue_index = cfg.last_played ? cfg.preselect : -1; // P2-01
+	m_screen_time = -10;
+	if (cfg.after_bios_startup)
+		m_startup_played = true; // P2-24: the BIOS's startup had the real sound
+	if (cfg.returning)
+	{
+		m_return_until = S3Active() ? -1.0 : 2.4; // shelf v3: its own opening instead of the old boot towers (S3Init)
+		uint32_t seed = 4242;
+		auto rnd = [&seed]() {
+			seed = seed * 1664525u + 1013904223u;
+			return static_cast<float>(seed >> 8) / 16777216.0f;
+		};
+		uint64_t most = 1;
+		for (const auto& h : cfg.play_history)
+			most = std::max(most, h.second);
+		const size_t count = std::max<size_t>(cfg.play_history.size(), 12);
+		for (size_t i = 0; i < count && i < 46; i++)
+		{
+			const float ang = rnd() * 2.0f * kPi, d = 2.6f + rnd() * 7.0f;
+			float h = 0.3f + std::pow(rnd(), 1.8f) * 1.2f;
+			if (i < cfg.play_history.size()) // taller for more time played (a log scale: one long game must not flatten the rest)
+				h = 0.4f + 3.8f * std::log1p(static_cast<float>(cfg.play_history[i].second) / 60.0f) / std::log1p(static_cast<float>(most) / 60.0f);
+			m_towers.push_back({std::cos(ang) * d, std::sin(ang) * d, h});
+		}
+		m_startup_played = true; // the return has its own moment; startup.wav is for the first time the shelf appears
+	}
 	m_atlas = m_renderer->CreateTexture(static_cast<uint32_t>(fonts->AtlasWidth()), static_cast<uint32_t>(fonts->AtlasHeight()),
 		VK_FORMAT_R8_UNORM, fonts->AtlasPixels().data());
 	if (!m_atlas)
@@ -247,8 +183,9 @@ bool App::Init(Renderer* renderer, const Fonts* fonts, std::vector<GameInfo> gam
 	return true;
 }
 
-void App::SetGames(std::vector<GameInfo> games, int preselect)
+void App::SetGames(std::vector<GameInfo> games, int preselect, bool last_played)
 {
+	m_continue_index = last_played ? preselect : -1; // P2-01
 	const size_t all = games.size();
 	const size_t hidden = static_cast<size_t>(std::count_if(games.begin(), games.end(), [](const GameInfo& g) { return g.hidden; }));
 	// The entries already on the shelf (a disc drive's, a copy's: indices below 0) stay; the games join them as Init's list would be.
@@ -256,6 +193,9 @@ void App::SetGames(std::vector<GameInfo> games, int preselect)
 	for (size_t i = 0; i < games.size(); i++)
 		m_shelved.push_back({std::move(games[i]), Slot(), static_cast<int>(i)});
 	ApplyHidden(keep);
+	RebuildSources(); // ps2-console-shelf
+	if (!m_moved && !m_cfg.returning && !m_games.empty())
+		m_selected = 0; // shelf v3: a new session opens the Library at the top (kurolume); back from a game, on that game
 	m_scroll = static_cast<float>(m_selected);
 	m_scroll_vel = 0;
 	m_select_time = m_time;
@@ -369,7 +309,7 @@ void App::RefreshBios()
 void App::UpdateBiosChoice(const Input& in)
 {
 	const int cards = m_cfg.open_bios_bundled ? 2 : 1;
-	if (cards == 2 && ((in.left && !m_prev.left) || (in.right && !m_prev.right)))
+	if (cards == 2 && ((in.left && !m_prev.left) || (in.right && !m_prev.right) || (in.up && !m_prev.up) || (in.down && !m_prev.down))) // ps2: a list
 	{
 		m_bios_sel = 1 - m_bios_sel;
 		Sound(Sfx::Move, in.left ? -0.2f : 0.2f);
@@ -381,7 +321,7 @@ void App::UpdateBiosChoice(const Input& in)
 		std::fflush(stdout);
 		m_bios_ask = false;
 		m_bios_wait = BiosWait::None;
-		Sound(Sfx::Edge, 0.0f);
+		Sound(Sfx::Back, 0.0f);
 		return;
 	}
 	if (!(in.cross && !m_prev.cross))
@@ -438,63 +378,46 @@ void App::UpdateBiosChoice(const Input& in)
 
 void App::BuildBiosChoice(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent)
 {
-	const float e = Smoothstep(0.0f, 1.0f, m_bios_anim);
+	// ps2-console-shelf (AI-assisted): the BIOS question takes the whole display (Build gives it the dark fog): the question in yellow,
+	// the choices as a list on the right with the focused one in cyan and what it means under it, a glass cube turning on the left.
+	(void)k;
+	(void)accent;
+	const float e = Smoothstep(0.0f, 1.0f, m_bios_anim), s = H / 1080.0f;
 	const size_t begin = ui.size();
-	const uint32_t hi = Rgba(1, 1, 1), mid = Rgba(0.76f, 0.74f, 0.86f), lo = Rgba(0.56f, 0.54f, 0.68f);
-	const uint32_t ink = Rgba(0.07f, 0.06f, 0.16f), inkmid = Rgba(0.30f, 0.28f, 0.44f);
-	Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.76f));
-
-	// The panel, as the disc question's (BuildDiscAsk): a shadow, a rim, the body, an amber line along its top (the BIOS line's colour).
-	const float pw = 1560 * k, ph = 700 * k, px = (W - pw) * 0.5f, py = (H - ph) * 0.5f - 20 * k;
-	const float pad = 84 * k, cx = px + pad, inner = pw - 2 * pad;
-	Fonts::AddRoundedRect(ui, px - 8 * k, py + 14 * k, pw + 16 * k, ph + 16 * k, 52 * k, Rgba(0, 0, 0, 0.38f));
-	Fonts::AddRoundedRect(ui, px - 2 * k, py - 2 * k, pw + 4 * k, ph + 4 * k, 46 * k, Rgba(1, 1, 1, 0.14f));
-	Fonts::AddRoundedRect(ui, px, py, pw, ph, 44 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f));
-	Fonts::AddRoundedRect(ui, px + 120 * k, py, pw - 240 * k, 6 * k, 3 * k, Rgba(0.95f, 0.62f, 0.22f));
-
-	m_fonts->AddText(ui, Fit(*m_fonts, Tr(Str::BiosChoiceTitle), 60 * k, inner).c_str(), cx, py + 120 * k, 60 * k, hi, 0.55f);
-	m_fonts->AddText(ui, Fit(*m_fonts, Tr(Str::BiosChoiceIntro), 30 * k, inner).c_str(), cx, py + 184 * k, 30 * k, mid, 0.2f);
-	Fonts::AddRoundedRect(ui, cx, py + 222 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.10f));
-
-	const bool two = m_cfg.open_bios_bundled;
-	const float gap = 36 * k, cw = two ? (inner - gap) * 0.5f : inner, ch = 240 * k, cy = py + 270 * k;
-	auto card = [&](float x0, const std::string& title, const std::string& line1, const std::string& line2, bool focused) {
-		if (focused)
-		{
-			Fonts::AddRoundedRect(ui, x0 - 8 * k, cy - 8 * k, cw + 16 * k, ch + 16 * k, 46 * k, Rgba(1, 1, 1, 0.16f));
-			Fonts::AddRoundedRect(ui, x0 - 4 * k, cy - 4 * k, cw + 8 * k, ch + 8 * k, 42 * k, accent);
-			Fonts::AddRoundedRect(ui, x0, cy, cw, ch, 38 * k, Rgba(1, 1, 1, 0.96f));
-		}
-		else
-			Fonts::AddRoundedRect(ui, x0, cy, cw, ch, 38 * k, Rgba(1, 1, 1, 0.07f));
-		const uint32_t t = focused ? ink : hi, c = focused ? inkmid : mid;
-		const float tw = cw - 48 * k;
-		m_fonts->AddText(ui, Fit(*m_fonts, title, 44 * k, tw).c_str(), x0 + cw * 0.5f, cy + 88 * k, 44 * k, t, 0.55f, Fonts::Center);
-		m_fonts->AddText(ui, Fit(*m_fonts, line1, 29 * k, tw).c_str(), x0 + cw * 0.5f, cy + 148 * k, 29 * k, c, 0.15f, Fonts::Center);
-		m_fonts->AddText(ui, Fit(*m_fonts, line2, 29 * k, tw).c_str(), x0 + cw * 0.5f, cy + 190 * k, 29 * k, c, 0.15f, Fonts::Center);
-	};
+	ps2::Cube(ui, 520.0f * s, 520.0f * s, 170.0f * s, static_cast<float>(m_time) * 0.25f, 0.55f, 0.25f, 0.9f);
+	ps2::Text(ui, *m_fonts, "PS5SX2", 110.0f * s, 128.0f * s, 40.0f * s, ps2::White());
+	ps2::Text(ui, *m_fonts, Fit(*m_fonts, Tr(Str::BiosChoiceTitle), 48.0f * s, W * 0.6f).c_str(), W - 110.0f * s, 132.0f * s, 48.0f * s, ps2::Yellow(),
+		Fonts::Right);
+	float y = 180.0f * s;
+	for (const std::string& line : Wrap(*m_fonts, Tr(Str::BiosChoiceIntro), 28.0f * s, W * 0.5f, 3))
+	{
+		ps2::Text(ui, *m_fonts, line.c_str(), W - 110.0f * s, y, 28.0f * s, ps2::Detail(), Fonts::Right);
+		y += 38.0f * s;
+	}
 	char own[320];
 	std::snprintf(own, sizeof(own), Tr(Str::BiosAddOwnLine1), m_cfg.bios_dir.c_str());
-	if (two)
+	const bool two = m_cfg.open_bios_bundled;
+	struct Choice
 	{
-		card(cx, Tr(Str::BiosUseOpen), Tr(Str::BiosUseOpenLine1), Tr(Str::BiosUseOpenLine2), m_bios_sel == 0);
-		card(cx + cw + gap, Tr(Str::BiosAddOwn), own, Tr(Str::BiosAddOwnLine2), m_bios_sel == 1);
-	}
-	else
-		card(cx, Tr(Str::BiosAddOwn), own, Tr(Str::BiosAddOwnLine2), true);
-
-	float hx = cx;
-	auto hint = [&](const char* key, const char* what) {
-		const float kpx = 24 * k, kw = m_fonts->Measure(key, kpx) + 36 * k, kh = 46 * k, hy = py + ph - 100 * k;
-		Fonts::AddRoundedRect(ui, hx, hy, kw, kh, kh * 0.5f, Rgba(1, 1, 1, 0.14f));
-		m_fonts->AddText(ui, key, hx + kw * 0.5f, hy + kh * 0.5f + 9 * k, kpx, hi, 0.45f, Fonts::Center);
-		hx += kw + 14 * k;
-		hx += m_fonts->AddText(ui, what, hx, hy + kh * 0.5f + 9 * k, kpx, lo, 0.20f) + 40 * k;
+		std::string title, line1, line2;
 	};
-	if (two)
-		hint("Left / Right", Tr(Str::BiosHintChoose));
-	hint("Cross", Tr(Str::BiosHintConfirm));
-	hint("Circle", Tr(Str::HintBack));
+	const Choice open = {Tr(Str::BiosUseOpen), Tr(Str::BiosUseOpenLine1), Tr(Str::BiosUseOpenLine2)};
+	const Choice mine = {Tr(Str::BiosAddOwn), own, Tr(Str::BiosAddOwnLine2)};
+	const Choice* list[2] = {two ? &open : &mine, two ? &mine : nullptr};
+	const int focus = two ? m_bios_sel : 0;
+	float cy = H * 0.52f;
+	for (int i = 0; i < 2 && list[i]; i++)
+	{
+		const bool f = i == focus;
+		ps2::Text(ui, *m_fonts, Fit(*m_fonts, list[i]->title, (f ? 50.0f : 40.0f) * s, W * 0.5f).c_str(), W - 150.0f * s, cy, (f ? 50.0f : 40.0f) * s,
+			f ? ps2::Cyan() : ps2::Grey(), Fonts::Right, f ? 1.0f : 0.0f);
+		cy += 62.0f * s;
+	}
+	const Choice& c = *list[focus];
+	ps2::Text(ui, *m_fonts, Fit(*m_fonts, c.line1 + " " + c.line2, 26.0f * s, W * 0.55f).c_str(), W - 150.0f * s, cy, 26.0f * s,
+		ps2::Rgba(0.68f, 0.70f, 0.75f), Fonts::Right);
+	const ps2::Prompt p[] = {{icon::Cross, "Enter"}, {icon::Circle, Tr(Str::HintBack)}};
+	ps2::Prompts(ui, *m_fonts, p, 2, W - 110.0f * s, H - 110.0f * s, 38.0f * s, true);
 	FadeRange(ui, begin, ui.size(), e);
 }
 
@@ -527,6 +450,8 @@ void App::SetWebUrl(const std::string& url, const std::string& shown)
 
 void App::Shutdown()
 {
+	if (m_cfg.sound) // shelf v3 (AI-assisted): the menu's music stops with the shelf
+		m_cfg.sound->SetStream(nullptr);
 	// 2.12: a request for a tile that the helper has not taken within moments is not left for a helper that is loaded later (the page's too: one registry).
 	if (!m_cfg.tiles_dir.empty())
 		gametile::WithdrawOwn(m_cfg.tiles_dir, gametile::kShutdownWithdrawS, gametile::WallSeconds());
@@ -573,8 +498,9 @@ bool App::Step(int dir)
 
 int App::PositionOf(int index) const
 {
-	const auto it = std::lower_bound(m_index.begin(), m_index.end(), index); // m_index keeps Init's order
-	return it != m_index.end() && *it == index ? static_cast<int>(it - m_index.begin()) : -1;
+	// shelf v3 (AI-assisted): the Library may be sorted, so m_index need not keep Init's order: a plain search.
+	const auto it = std::find(m_index.begin(), m_index.end(), index);
+	return it != m_index.end() ? static_cast<int>(it - m_index.begin()) : -1;
 }
 
 bool App::ApplyHidden(int keep)
@@ -600,7 +526,11 @@ bool App::ApplyHidden(int keep)
 	int at = -1, after = -1, before = -1;
 	for (Entry& e : all)
 	{
-		if ((e.game.hidden && !m_show_hidden) || (!m_search.applied.empty() && e.index >= 0 && !SearchMatches(e.game))) // 2.11: and the search's
+		if (S3Active()) // shelf v3 (AI-assisted): a multi-disc game's entry goes by its name without the disc tag (shown, searched, sorted)
+			e.game.title = WithoutDiscTag(e.game.title);
+		if ((e.game.hidden && !m_show_hidden) || (!m_search.applied.empty() && e.index >= 0 && !SearchMatches(e.game)) || // 2.11: and the search's
+			(e.index >= 0 && !SourceMatches(e.game)) || // ps2-console-shelf: and the Browser's source
+			(S3Active() && !S3Keep(e.game, e.index))) // shelf v3 (AI-assisted): and the Library's Show filter
 		{
 			m_shelved.push_back({std::move(e.game), e.slot, e.index});
 			continue;
@@ -617,6 +547,8 @@ bool App::ApplyHidden(int keep)
 		m_index.push_back(e.index);
 	}
 	m_selected = at >= 0 ? at : after >= 0 ? after : before >= 0 ? before : 0;
+	if (S3Active()) // shelf v3 (AI-assisted): the Library's sort
+		S3SortShelf();
 	if (m_index == was)
 		return false;
 	m_scroll = static_cast<float>(m_selected);
@@ -652,10 +584,22 @@ void App::KeepCoversNear()
 	if (n == 0)
 		return;
 	const int scroll = static_cast<int>(std::lround(m_scroll));
+	// shelf v3: the Browser's Library fan shows four games picked at random from anywhere in the Library: their covers are kept
+	// whatever the selection (else they were plain blue cases; kurolume, 2026-11-16).
+	auto in_fan = [this](int pos) {
+		const std::string& ser = m_games[static_cast<size_t>(pos)].serial;
+		return !ser.empty() && std::find(m_s3.fan_pick.begin(), m_s3.fan_pick.end(), ser) != m_s3.fan_pick.end();
+	};
 	for (int pos = 0; pos < n; pos++)
 		if (m_index[static_cast<size_t>(pos)] >= 0 && m_slots[static_cast<size_t>(pos)].wanted &&
-			std::abs(pos - m_selected) > kCoverDrop && std::abs(pos - scroll) > kCoverDrop) // live-22: never the dump entry
+			std::abs(pos - m_selected) > kCoverDrop && std::abs(pos - scroll) > kCoverDrop && !in_fan(pos)) // live-22: never the dump entry
 			DropCovers(m_slots[static_cast<size_t>(pos)], m_index[static_cast<size_t>(pos)]);
+	for (int pos = 0; pos < n; pos++)
+		if (m_index[static_cast<size_t>(pos)] >= 0 && !m_slots[static_cast<size_t>(pos)].wanted && in_fan(pos))
+		{
+			m_slots[static_cast<size_t>(pos)].wanted = true;
+			m_covers->Want(m_index[static_cast<size_t>(pos)]);
+		}
 	for (Shelved& h : m_shelved) // vk-285-137: off the shelf, not drawn
 		if (h.slot.wanted)
 			DropCovers(h.slot, h.index);
@@ -771,7 +715,9 @@ void App::PollCovers()
 			for (size_t pos = 0; pos < m_slots.size(); pos++)
 			{
 				Slot& other = m_slots[pos];
-				if ((other.back_wanted || other.back_real) && m_index[pos] != sel_index)
+				const std::string& oser = m_games[pos].serial;
+				const bool fan = !oser.empty() && std::find(m_s3.fan_pick.begin(), m_s3.fan_pick.end(), oser) != m_s3.fan_pick.end();
+				if ((other.back_wanted || other.back_real) && m_index[pos] != sel_index && !fan) // (the Browser's fan keeps its backs)
 				{
 					// R3 (build 175): a case still turned over on screen keeps its back until the flip has brought it round (PollBackHolds); a back
 					// only asked for (no texture to keep) and one not turned over are let go at once, as before.
@@ -791,6 +737,20 @@ void App::PollCovers()
 			m_back_for = sel_index;
 		}
 		PollBackHolds(sel_index);
+		// shelf v3: the Browser's Library fan turns its four cases over as it leaves for the Library: their backs are asked for too
+		// (kurolume: they flipped to blank backs).
+		for (size_t pos = 0; pos < m_slots.size(); pos++)
+		{
+			Slot& fs = m_slots[pos];
+			const std::string& ser = m_games[pos].serial;
+			if (m_index[pos] < 0 || !fs.wanted || fs.back_wanted || fs.back_real || ser.empty() ||
+				std::find(m_s3.fan_pick.begin(), m_s3.fan_pick.end(), ser) == m_s3.fan_pick.end())
+				continue;
+			fs.back_wanted = true;
+			fs.back_net = true;
+			fs.back_asked = m_time;
+			m_covers->WantBack(m_index[pos], true);
+		}
 		Slot& sel = m_slots[static_cast<size_t>(m_selected)];
 		const double dwell = m_time - m_select_time;
 		if (sel.wanted && !sel.back_real)
@@ -862,8 +822,8 @@ void App::PollCovers()
 				}
 		if (!slot || !slot->wanted) // 2026-10-10: dropped since (KeepCoversNear)
 			continue;
-		if (img.kind == CoverImage::RealBack && img.game != m_back_for) // 2.11: arrived after the selection moved on: not kept (the file is in the cache)
-			continue;
+		if (img.kind == CoverImage::RealBack && img.game != m_back_for && !(slot && slot->back_wanted)) // 2.11: arrived after the selection moved
+			continue; // on: not kept (the file is in the cache); shelf v3: unless still wanted (the Browser's fan)
 		Slot& s = *slot;
 		Texture* t = m_renderer->CreateTexture(static_cast<uint32_t>(img.width), static_cast<uint32_t>(img.height),
 			VK_FORMAT_R8G8B8A8_UNORM, img.rgba.data());
@@ -900,13 +860,15 @@ void App::PollCovers()
 			s.set = m_renderer->AllocTextureSet(s.cover ? s.cover : s.placeholder, s.placeholder, s.spine,
 				s.back_real ? s.back_real : s.back_ph ? s.back_ph : s.placeholder); // 2.11: and the back
 			s.dirty = !s.set; // 2026-10-10: the pool full for now (sets freed are given back a frame later): try again
+			if (s.set && s.shown_at < 0)
+				s.shown_at = m_time; // P2-04
 		}
 }
 
 // 2.11: the disc art arrived (CoverService::RequestDisc): a texture of its own, drawn over the dump entry's box (Build) in place of the painted disc.
 void App::TakeDiscArt(const CoverImage& img)
 {
-	if ((!m_dump_on && !m_drive_on) || img.width < 16 || img.height < 16 || img.serial != m_disc_art_serial)
+	if ((!m_dump_on && !m_drive_on && !(S3Active() && m_s3.disc_in)) || img.width < 16 || img.height < 16 || img.serial != m_disc_art_serial) // shelf v3: the Browser's disc
 	return;
 	Texture* t = m_renderer->CreateTexture(static_cast<uint32_t>(img.width), static_cast<uint32_t>(img.height), VK_FORMAT_R8G8B8A8_UNORM, img.rgba.data());
 	if (!t)
@@ -923,7 +885,8 @@ void App::TakeDiscArt(const CoverImage& img)
 	m_dump_disc = t;
 	m_dump_disc_set = set;
 	m_dump_disc_aspect = static_cast<float>(img.width) / static_cast<float>(img.height);
-	std::printf("[frontend] disc dump: the disc's own art (%s, %dx%d)\n", img.source, img.width, img.height);
+	m_dump_disc_front = img.front; // P2-17
+	std::printf("[frontend] disc dump: the disc's own art (%s, %dx%d%s)\n", img.source, img.width, img.height, img.front ? ", the front as its label" : "");
 	std::fflush(stdout);
 }
 
@@ -934,6 +897,7 @@ void App::FreeDiscArt()
 	m_renderer->DestroyTexture(m_dump_disc);
 	m_dump_disc_set = VK_NULL_HANDLE;
 	m_dump_disc = nullptr;
+	m_dump_disc_front = false;
 	m_disc_art_serial.clear();
 	}
 
@@ -1186,6 +1150,8 @@ std::fflush(stdout);
 // is being copied (that entry stands for it) or the shelf is closing for a game.
 void App::PollDriveDisc()
 {
+if (S3Active()) // shelf v3 (AI-assisted): the disc is the Browser's object, not a Library entry
+return;
 // The disc art is let go two seconds after the last entry that wanted it (the drive's entry becomes the copy's and back without asking again).
 if (!m_dump_on && !m_drive_on && !m_disc_art_serial.empty())
 {
@@ -1220,7 +1186,9 @@ void App::Update(double dt, const Input& in)
 	const float fdt = static_cast<float>(std::min(dt, 0.1));
 	m_dump_spin += fdt; // live-22: the dump disc's rotation, advanced whether or not a dump is on
 	PollDiscAsk();
-	m_ask_anim += ((m_ask_on ? 1.0f : 0.0f) - m_ask_anim) * (1.0f - std::exp(-fdt * 16.0f));
+	if (m_s3.spin_t0 >= 0 && m_time - m_s3.spin_t0 > kDiscSpinUp + 4.0)
+		m_s3.spin_t0 = -1; // spun up, but no game came (it could not start from the drive): back to the Browser
+	m_ask_anim += (((m_ask_on || m_s3.spin_t0 >= 0) ? 1.0f : 0.0f) - m_ask_anim) * (1.0f - std::exp(-fdt * 16.0f));
 	m_bios_anim += ((m_bios_ask ? 1.0f : 0.0f) - m_bios_anim) * (1.0f - std::exp(-fdt * 16.0f)); // bioscheck
 
 	// 2.11: the search: what the settings page's box says, the PS5's keyboard while it is up, and the fades.
@@ -1269,17 +1237,43 @@ void App::Update(double dt, const Input& in)
 	{
 		if (m_game_achievements.busy)
 			m_launch_time = m_time;
-		if (m_time - m_launch_time > 0.6 && !m_game_achievements.busy)
+		// (Off the shelf v3 game page the hold is its fade to black plus a few black frames.)
+		const double hold = m_s3.launch_fade_t0 >= 0 ? kLaunchFade + 0.1 : 0.6;
+		if (m_time - m_launch_time > hold && !m_game_achievements.busy)
 			m_done = true;
 	}
 	else if (m_bios_ask) // bioscheck: the BIOS question
 	{
 		UpdateBiosChoice(in);
 		m_prev = in;
+		m_s3.resync = true; // shelf v3
+	}
+	else if (m_s3.spin_t0 >= 0 && S3Active()) // shelf v3: the disc spins up after Play; no buttons until its game starts
+	{
+		S3Update(dt, Input{});
+		m_prev = in;
+		m_s3.resync = true;
 	}
 	else if (m_ask_on)
 	{
 		UpdateDiscAsk(in);
+		m_prev = in;
+		// shelf v3: the shelf keeps ticking under the question (no buttons), or the question, drawn by the shelf on its tick counter
+		// (ask_dd0), never fades in and everything behind it stands still (kurolume, 2026-11-16).
+		if (S3Active())
+			S3Update(dt, Input{});
+		m_s3.resync = true; // shelf v3: the buttons held here don't count as presses when the shelf has the pad again
+	}
+	else if (m_return_until > m_time) // ps2-console-shelf: the boot towers; a press shortens them
+	{
+		if ((in.cross && !m_prev.cross) || (in.circle && !m_prev.circle))
+			m_return_until = std::min(m_return_until, m_time + 0.4);
+		m_released = false;
+		m_prev = in;
+	}
+	else if (S3Active()) // shelf v3 (AI-assisted): the v3 screens have the pad
+	{
+		S3Update(dt, in);
 		m_prev = in;
 	}
 	else if (m_search.typing)
@@ -1321,6 +1315,16 @@ void App::Update(double dt, const Input& in)
 		m_held = 0;
 		m_prev = in;
 	}
+	else if (m_screen == Screen::Home) // ps2-console-shelf: the PS2 main menu
+	{
+		UpdateHome(in);
+		m_prev = in;
+	}
+	else if (m_screen == Screen::Browser) // ps2-console-shelf: where games live
+	{
+		UpdateBrowser(in);
+		m_prev = in;
+	}
 	else
 	{
 		const bool any = in.left || in.right || in.cross || in.options || in.l1 || in.r1 || in.up || in.down || in.square || in.triangle ||
@@ -1329,10 +1333,11 @@ void App::Update(double dt, const Input& in)
 			m_released = !any;
 		else
 		{
-			const int dir = in.left ? -1 : in.right ? 1 : 0;
-			const bool fresh = (in.left && !m_prev.left) || (in.right && !m_prev.right);
+			// ps2-console-shelf: the Library is a grid of six columns: up and down go a row.
+			const int dir = in.left ? -1 : in.right ? 1 : in.up ? -kGridCols : in.down ? kGridCols : 0;
+			const bool fresh = (in.left && !m_prev.left) || (in.right && !m_prev.right) || (in.up && !m_prev.up) || (in.down && !m_prev.down);
 			// The sounds lean a little towards the side pressed.
-			const float pan = 0.18f * static_cast<float>(dir);
+			const float pan = 0.18f * static_cast<float>(dir > 0 ? 1 : dir < 0 ? -1 : 0);
 			if (dir != 0 && fresh)
 			{
 				Sound(Step(dir) ? Sfx::Move : Sfx::Edge, pan);
@@ -1358,10 +1363,10 @@ void App::Update(double dt, const Input& in)
 			{
 				m_chord_from = m_selected; // pr9n: undone if Square follows (the account chord)
 				m_chord_l1_time = m_time;
-				Sound(Step(-5) ? Sfx::JumpLeft : Sfx::Edge, -0.25f);
+				Sound(Step(-kGridCols * kGridRowsShown) ? Sfx::JumpLeft : Sfx::Edge, -0.25f);
 			}
 			if (in.r1 && !m_prev.r1)
-				Sound(Step(5) ? Sfx::JumpRight : Sfx::Edge, 0.25f);
+				Sound(Step(kGridCols * kGridRowsShown) ? Sfx::JumpRight : Sfx::Edge, 0.25f);
 			if (((in.cross && !m_prev.cross) || (in.options && !m_prev.options)) && !m_games.empty() && !m_qr_big)
 			{
 				const GameInfo& picked = m_games[static_cast<size_t>(m_selected)];
@@ -1400,26 +1405,24 @@ void App::Update(double dt, const Input& in)
 				}
 			}
 			// 2.11: R2 searches; Circle puts the whole shelf back while a search narrows it (and the QR view isn't up).
-			else if (!m_qr_big && in.r2 && !m_prev.r2 && m_sheet_anim < 0.05f && !m_launching)
+			// ps2-console-shelf: R2 or Triangle searches (the QR code moved to Home's Web Settings); Circle puts the whole Library back
+			// while a search narrows it, else goes back to the Browser.
+			else if (((in.r2 && !m_prev.r2) || (in.triangle && !m_prev.triangle)) && m_sheet_anim < 0.05f && !m_launching)
 			{
 				OpenSearch();
-				Sound(Sfx::Move, 0.3f);
+				Sound(Sfx::Open, 0.3f);
 			}
-			else if (!m_qr_big && in.circle && !m_prev.circle && !m_search.applied.empty())
+			else if (in.circle && !m_prev.circle && !m_search.applied.empty())
 			{
 				SetSearch(std::string());
-				Sound(Sfx::Move, -0.3f);
+				Sound(Sfx::Back, -0.3f);
 			}
-			// Triangle keeps the upstream QR view; Circle opens the RA account (AI-assisted).
-			else if (m_qr_big && ((in.triangle && !m_prev.triangle) || (in.circle && !m_prev.circle)))
+			else if (in.circle && !m_prev.circle && m_sheet_anim < 0.05f)
 			{
-				m_qr_big = false;
-				Sound(Sfx::Move, -0.3f);
-			}
-			else if (!m_qr_big && (in.triangle && !m_prev.triangle) && m_qr_size > 0 && m_sheet_anim < 0.05f)
-			{
-				m_qr_big = true;
-				Sound(Sfx::Move, 0.3f);
+				m_flip_latched = false;
+				RebuildSources();
+				GoTo(Screen::Browser);
+				Sound(Sfx::Back, 0.0f);
 			}
 			// vk-285-114: Square opens the selected game's options sheet (the settings for all games when there is no game).
 			else if (!m_qr_big && in.square && !m_prev.square && m_sheet_anim < 0.05f)
@@ -1427,16 +1430,68 @@ void App::Update(double dt, const Input& in)
 			// 2.11: a disc entry had no sheet of its own: the all-games one; gamedb (2026-10-30): it has, when it knows its settings file
 			OpenSheet(m_games.empty() || m_games[static_cast<size_t>(m_selected)].stem.empty());
 				m_chord_square_time = m_time; // pr9n: L1 right after makes it the account chord
-				Sound(Sfx::Move, 0.3f);
+				Sound(Sfx::Open, 0.3f);
 			}
 		}
 		m_prev = in;
 	}
 
-	m_qr_big_anim += (m_qr_big ? 1.0f : -1.0f) * fdt / 0.18f; // vk-285-118
+	m_qr_big_anim += (m_qr_big ? 1.0f : -1.0f) * fdt / 0.35f; // vk-285-118; P2-08: as slow as the other screen changes
 	m_qr_big_anim = std::min(1.0f, std::max(0.0f, m_qr_big_anim));
 	if (m_qr_size <= 0)
 		m_qr_big = false;
+
+	// ps2-console-shelf (AI-assisted): the Library's rows scroll to keep the picked case in view (three rows show), on a spring;
+	// the browser drone plays while the shelf is up, startup.wav the first time it appears, done.wav when an HD pack is in.
+	if (!m_games.empty())
+	{
+		const int row = m_selected / kGridCols;
+		if (row < m_grid_target)
+			m_grid_target = row;
+		else if (row > m_grid_target + kGridRowsShown - 1)
+			m_grid_target = row - (kGridRowsShown - 1);
+		const float gk = 120.0f, gc = 2.0f * std::sqrt(gk);
+		for (int i = 0; i < 4; i++)
+		{
+			const float h = fdt / 4;
+			m_grid_scroll_vel += (gk * (static_cast<float>(m_grid_target) - m_grid_scroll) - gc * m_grid_scroll_vel) * h;
+			m_grid_scroll += m_grid_scroll_vel * h;
+		}
+	}
+	// P2-21: the scroll arrows, as the PS2's Memory Card screen: up while there are rows above, down while there are rows below. They
+	// go by the rows wanted, so the up arrow comes as the rows start to move, fading in over 0.15 s (as the PS2's, frame by frame).
+	{
+		const int rows = (static_cast<int>(m_games.size()) + kGridCols - 1) / kGridCols;
+		const float step = fdt / 0.15f;
+		auto ease = [step](float& v, bool on) { v = on ? std::min(1.0f, v + step) : std::max(0.0f, v - step); };
+		ease(m_grid_up, m_grid_target > 0);
+		ease(m_grid_down, m_grid_target + kGridRowsShown < rows);
+	}
+	if (m_cfg.sound)
+	{
+		// shelf v3 (AI-assisted): the shelf plays the BIOS's own music (BOOTS, CLOKS); console-sounds' startup.wav and the ambient drone
+		// would play on top of it (a second, detuned opening), so neither plays.
+		if (!m_startup_played)
+		{
+			m_startup_played = true;
+			if (!S3Active())
+				Sound(Sfx::Startup, 0.0f);
+		}
+		// (the drone waits a few seconds at the start, under startup.wav's first notes)
+		m_cfg.sound->SetAmbient(!S3Active() && !m_launching && !m_done && m_return_until <= m_time && m_time > 4.0);
+	}
+	if (m_cfg.texture_packs && m_cfg.texture_packs.activity)
+	{
+		const TexturePackActivity a = m_cfg.texture_packs.activity();
+		const int st = a.active ? static_cast<int>(a.state) : -1;
+		if (st != m_texpack_done_state)
+		{
+			if (m_texpack_done_state == static_cast<int>(TexturePackStatus::State::Unpacking) && (st == -1 || a.title != m_texpack_done_serial))
+				Sound(Sfx::Done, 0.0f);
+			m_texpack_done_state = st;
+		}
+		m_texpack_done_serial = a.active ? a.title : std::string();
+	}
 
 	// The shelf follows the selection on a critically damped spring.
 	const float k = 150.0f, c = 2.0f * std::sqrt(k);
@@ -1524,563 +1579,147 @@ void App::Update(double dt, const Input& in)
 		m_glow[i] += (want[i] - m_glow[i]) * a;
 }
 
-void App::Pose(float d, float t, Mat4& model, float& brightness) const
-{
-	const float ad = std::fabs(d);
-	const float s = d < 0 ? -1.0f : 1.0f;
-	const float e = Smoothstep(0.0f, 1.0f, std::min(ad, 1.0f));
-	const float far_ = std::max(ad - 1.0f, 0.0f);
-	const float side_x = kSideX + far_ * kStepX;
-	const float side_z = kSideZ - far_ * kStepZ;
-	const float sway = (1.0f - e) * 0.10f * std::sin(t * 0.7f);
-	// The picked case hovers: it lifts off the floor as it is picked, then bobs between 0.03 and
-	// 0.054 above it. Resting on the floor at the bottom of the bob (vk-285-46) still put the
-	// halo's bottom line, drawn 0.016 outside the case, into the reflection.
-	const float bob = (1.0f - e) * (0.030f + 0.012f * (1.0f + std::sin(t * 1.3f)));
-	float x = s * Mix(0.0f, side_x, e);
-	float z = Mix(kCenterZ, side_z, e);
-	const float turn = Mix(sway, -s * Radians(kSideTurn), e);
-	if (m_launching && !m_system_menu && ad < 0.5f) // 2026-10-08: the system menu isn't the selected game
-	{
-		const float l = Smoothstep(0.0f, 0.6f, static_cast<float>(m_time - m_launch_time));
-		z += l * 2.2f;
-	}
-	model = Mat4::Translate(x, bob, z) * Mat4::RotateY(turn + FlipTurn(d)); // 2.11: turned over with the right stick
-	brightness = Mix(1.0f, 0.74f, e) - 0.05f * std::min(far_, 5.0f);
-}
+
+// P2-12: the older panels (account, folder picker, search and its keyboard) drawn this much larger: their 4K sizes read small on a TV.
+// The folder picker less so (its list has a fixed height and lost rows at the larger size).
+constexpr float kPanelScale = 1.45f;
+constexpr float kPickerScale = 1.2f;
 
 void App::Build(FrameDesc& f, const std::string& clock)
 {
+	// ps2-console-shelf (AI-assisted): every screen fills the display with the PS2 system software's look (fe_ps2ui_impl.h). The screen
+	// on top is drawn alone: a sheet, the account, the disc question or the return sequence take the whole display, as on the PS2.
 	m_achievement_images.clear();
 	f.ui_images.clear();
 	const float W = static_cast<float>(m_renderer->width()), H = static_cast<float>(m_renderer->height());
-	const float k = H / 2160.0f;
+	const float k = H / 2160.0f, s = H / 1080.0f;
 	const float t = static_cast<float>(m_time);
-	const Mat4 proj = Mat4::Perspective(Radians(kFovY), W / H, 0.1f, 60.0f);
-	// vk-285-114: with the options sheet open on the right, the shelf slides left (the camera moves right), so the
-	// picked case stays in view beside its settings.
-	const float slide = Smoothstep(0.0f, 1.0f, m_sheet_anim);
-	const Vec3 shift(1.62f * slide, 0.0f, 0.0f); // 2026-10-05: 1.45 before the sheet widened
-	const Mat4 view = Mat4::LookAt(kEye + shift, kTarget + shift, Vec3(0, 1, 0));
-	f.view_proj = proj * view;
-	f.cam_pos = kEye + shift;
+	Ps2Camera(f, W, H);
 	f.time = t;
-	f.glow[0] = m_glow[0];
-	f.glow[1] = m_glow[1];
-	f.glow[2] = m_glow[2];
-	f.glow[3] = 1.0f;
-	f.floor_y = kFloorY;
-	f.reflect_strength = 0.24f;
+	f.glow[0] = f.glow[1] = f.glow[2] = 1.0f;
+	f.glow[3] = 0.5f;
+	f.floor_y = -100.0f;
+	f.reflect_strength = 0.0f;
 	f.reflect_falloff = 3.6f;
 	f.boxes.clear();
 	f.reflections.clear();
 	f.ui.clear();
 	f.halo = HaloDraw();
+	std::vector<UiVertex>& ui = f.ui;
+	const uint32_t accent = ps2::Cyan();
 
-	// Background: the glow sits behind the selected case, the floor glow under it.
-	const Vec2 centre = Project(f.view_proj, Vec3(0, 0.1f, kCenterZ - 0.6f));
-	const Vec2 floor_pt = Project(f.view_proj, Vec3(0, kFloorY, kCenterZ));
-	BgParams& bg = f.bg;
-	bg.glow_color[0] = m_glow[0];
-	bg.glow_color[1] = m_glow[1];
-	bg.glow_color[2] = m_glow[2];
-	bg.glow_color[3] = 0.50f;
-	bg.glow_pos[0] = centre.x;
-	bg.glow_pos[1] = centre.y;
-	bg.glow_pos[2] = 0.58f;
-	bg.glow_pos[3] = 0.40f;
-	bg.floor_glow[0] = floor_pt.x;
-	bg.floor_glow[1] = floor_pt.y;
-	bg.floor_glow[2] = 0.30f;
-	bg.floor_glow[3] = 0.035f;
-	const float top[4] = {0.030f, 0.034f, 0.095f, 1}, mid[4] = {0.055f, 0.055f, 0.155f, 1},
-				bottom[4] = {0.010f, 0.010f, 0.026f, 1};
-	std::copy(top, top + 4, bg.top);
-	std::copy(mid, mid + 4, bg.mid);
-	std::copy(bottom, bottom + 4, bg.bottom);
-	bg.misc[0] = W / H;
-	bg.misc[1] = floor_pt.y;
-	bg.misc[2] = 0.55f;
-	bg.misc[3] = t;
-
-	// The cases, nearest the selection last so the halo lands on top of its neighbours.
-	const int n = static_cast<int>(m_games.size());
-	const int first = std::max(0, static_cast<int>(std::floor(m_scroll)) - kVisible);
-	const int last = std::min(n - 1, static_cast<int>(std::ceil(m_scroll)) + kVisible);
-	const float since = static_cast<float>(m_time - m_select_time);
-	for (int i = first; i <= last; i++)
-	{
-		const Slot& s = m_slots[static_cast<size_t>(i)];
-		if (!s.set)
-			continue;
-		const float d = static_cast<float>(i) - m_scroll;
-		BoxDraw b;
-		Pose(d, t, b.model, b.brightness);
-		if (m_games[static_cast<size_t>(i)].hidden) // vk-285-137: shown while Show hidden games is on, dimmed
-			b.brightness *= 0.4f;
-		b.set = s.set;
-		b.cover_mix = s.cover_mix;
-		b.selected = std::max(0.0f, 1.0f - std::fabs(d) * 2.0f);
-		if (i == m_selected && since < 1.2f)
-		{
-			b.sheen_pos = -0.3f + since * 1.6f;
-			b.sheen_strength = 0.16f * (1.0f - Smoothstep(0.6f, 1.2f, since));
-		}
-		f.boxes.push_back(b);
-		BoxDraw r = b;
-		r.model = Mat4::Translate(0, 2 * kFloorY, 0) * Mat4::Scale(1, -1, 1) * b.model;
-		r.sheen_strength = 0;
-		f.reflections.push_back(r);
-		// live-22: the disc being copied: a spinning disc and the live percentage over its box.
-		if (m_index[static_cast<size_t>(i)] == kDumpIndex)
-		{
-			const float a = std::max(0.0f, 1.0f - std::fabs(d) * 1.6f) * b.brightness;
-			if (m_dump_disc_set)
-			{
-			AddDiscArt(f.ui, m_achievement_images, m_dump_disc_set, m_dump_disc_aspect, f.view_proj, b.model, m_dump_spin * 2.2f, a, W, H); // 2.11
-			AddDiscSpinner(f.ui, f.view_proj, b.model, m_dump_spin, a, W, H, false); // the loading arc round it
-			}
-			else
-			AddDiscSpinner(f.ui, f.view_proj, b.model, m_dump_spin, a, W, H);
-			const Vec4 wp = b.model * Vec4(0.0f, kDiscTextY, kBoxHalfD + 0.01f, 1.0f);
-			const Vec4 cp = f.view_proj * wp;
-			const float sx = ((cp.x / cp.w) * 0.5f + 0.5f) * W, sy = ((cp.y / cp.w) * 0.5f + 0.5f) * H;
-			char pctbuf[8];
-			std::snprintf(pctbuf, sizeof(pctbuf), "%d%%", m_dump_pct);
-			const float ppx = (54.0f + 60.0f * b.selected) * k;
-			m_fonts->AddText(f.ui, pctbuf, sx, sy, ppx, Rgba(1.0f, 1.0f, 1.0f, std::min(1.0f, a * 1.4f)), 0.6f, Fonts::Center);
-			}
-			else if (m_index[static_cast<size_t>(i)] == kDriveIndex)
-			{
-			// 2.11: the disc in the drive, not copied: its own art on the box, turning slowly, and what picking it does.
-			const float a = std::max(0.0f, 1.0f - std::fabs(d) * 1.6f) * b.brightness;
-			if (m_dump_disc_set)
-			AddDiscArt(f.ui, m_achievement_images, m_dump_disc_set, m_dump_disc_aspect, f.view_proj, b.model, m_dump_spin * 0.45f, a, W, H);
-			else
-			AddDiscSpinner(f.ui, f.view_proj, b.model, m_dump_spin * 0.18f, a, W, H, true, false);
-			const Vec4 cp = f.view_proj * (b.model * Vec4(0.0f, kDiscTextY, kBoxHalfD + 0.01f, 1.0f));
-			const float sx = ((cp.x / cp.w) * 0.5f + 0.5f) * W, sy = ((cp.y / cp.w) * 0.5f + 0.5f) * H;
-			const float ppx = (30.0f + 26.0f * b.selected) * k;
-			m_fonts->AddText(f.ui, "Disc in the drive", sx, sy, ppx, Rgba(1.0f, 1.0f, 1.0f, std::min(1.0f, a * 1.4f)), 0.6f, Fonts::Center);
-			if (b.selected > 0.5f)
-			m_fonts->AddText(f.ui, "Play it or copy it", sx, sy + 46.0f * k, 26.0f * k, Rgba(0.82f, 0.80f, 0.92f, std::min(1.0f, a * 1.2f)), 0.3f, Fonts::Center);
-			}
-	}
-
-	// The outline glow on the selected case once the shelf settles on it.
-	const float settle = 1.0f - Clamp(std::fabs(m_scroll - static_cast<float>(m_selected)) * 2.5f, 0.0f, 1.0f);
-	if (n > 0 && settle > 0.0f && m_slots[static_cast<size_t>(m_selected)].set && !m_launching)
-	{
-		float bright;
-		Pose(static_cast<float>(m_selected) - m_scroll, t, f.halo.model, bright);
-		f.halo.enabled = true;
-		f.halo.half_w = kBoxHalfW;
-		f.halo.half_h = kBoxHalfH;
-		f.halo.z = kBoxHalfD - 0.004f;
-		f.halo.margin = 0.22f;
-		f.halo.radius = 0.035f;
-		f.halo.line = 0.0065f;
-		f.halo.glow_width = 0.035f;
-		f.halo.color[0] = Mix(m_glow[0], 1.0f, 0.8f);
-		f.halo.color[1] = Mix(m_glow[1], 1.0f, 0.8f);
-		f.halo.color[2] = Mix(m_glow[2], 1.0f, 0.8f);
-		f.halo.color[3] = settle * (0.50f + 0.08f * std::sin(t * 2.2f)) * (1.0f - std::min(1.0f, std::fabs(m_flip) * 2.0f)); // 2.11: gone as it turns over
-	}
-
-	// Fade out when launching. 186 (swordpdf, 2026-11-02, on opening PS5SX2 from the home screen: "it can be faster"): no fade in at start any more. The
-	// system's launch screen (sce_sys/pic1.dds) is up until the first frame, and after "back to the menu" the screen is black: either way the 0.35 s fade
-	// from black only put a dark moment between them and the shelf.
+	// The frame dips towards black as one full screen gives way to another (the PS2 fades between its screens).
 	f.fade = 1.0f;
+	f.ui_scene = 0; // P2-19e
+	f.ui_under = 0, f.ghost_end = 0, f.ghost_reset = false; // shelf v3 (AI-assisted): per frame too (a stale ui_under split a later screen's image ranges)
+	f.blur = 0.0f;
+	const float since = static_cast<float>(m_time - m_screen_time);
+	// P2-02: through black: the old screen out (since < 0), then the new one up. The fade darkens the 3D pass only, so the
+	// screen's words and prompts are faded with it below (they used to stay lit on the black).
+	float screen_fade = 1.0f;
+	if (m_zoom != 0) // P2-26: the Browser and its pages change without black
+		screen_fade = 1.0f;
+	else if (since < 0.0f)
+		screen_fade = Smoothstep(0.0f, static_cast<float>(kScreenOut), -since);
+	else if (since < kScreenIn)
+		screen_fade = Smoothstep(0.0f, kScreenIn, since);
+	f.fade *= screen_fade;
+	const double exit_t = SheetExit(); // P2-23: the sheet going back to Home: no dip, the field leaves in reverse, then Home fades up
+	if (m_sheet_anim > 0.0f && m_sheet_anim < 1.0f && exit_t < 0.0)
+		f.fade *= 0.35f + 0.65f * std::fabs(2.0f * m_sheet_anim - 1.0f);
 	if (m_launching)
 		f.fade *= 1.0f - Smoothstep(0.1f, 0.6f, static_cast<float>(m_time - m_launch_time));
 
-	// ---- UI ----
-	const uint32_t white = Rgba(1, 1, 1), dim = Rgba(0.72f, 0.69f, 0.82f), faint = Rgba(0.55f, 0.53f, 0.66f);
-	const uint32_t accent = Rgba(Mix(m_glow[0], 1.0f, 0.3f), Mix(m_glow[1], 1.0f, 0.3f), Mix(m_glow[2], 1.0f, 0.3f));
-	const float margin = 110.0f * k;
-	std::vector<UiVertex>& ui = f.ui;
-
-	// Wordmark (vk-285-50: PS5SX2, "SX2" in the glow's colour) and the author's handles under it.
-	float x = margin;
-	x += m_fonts->AddText(ui, "PS5", x, 150.0f * k, 60.0f * k, white, 0.8f);
-	m_fonts->AddText(ui, "SX2", x + 2.0f * k, 150.0f * k, 60.0f * k, accent, 0.8f);
+	if (m_return_until > m_time)
 	{
-		const float hpx = 32.0f * k, hy2 = 214.0f * k;
-		float hx2 = margin + 2.0f * k;
-		const bool icons = m_fonts->Has(icon::Discord) && m_fonts->Has(icon::XTwitter);
-		if (icons)
-			hx2 += m_fonts->AddText(ui, icon::Discord, hx2, hy2 + 2.0f * k, hpx * 1.05f, faint) + 12.0f * k;
-		hx2 += m_fonts->AddText(ui, kDiscordHandle, hx2, hy2, hpx, faint, 0.1f) + 40.0f * k;
-		if (icons)
-			hx2 += m_fonts->AddText(ui, icon::XTwitter, hx2, hy2 + 2.0f * k, hpx * 0.95f, faint) + 12.0f * k;
-		m_fonts->AddText(ui, kXHandle, hx2, hy2, hpx, faint, 0.1f);
+		BuildReturn(f, W, H);
+		return;
 	}
-	if (!clock.empty())
-		m_fonts->AddText(ui, clock.c_str(), W - margin, 150.0f * k, 58.0f * k, white, 0.2f, Fonts::Right);
-	if (m_cfg.achievements.state)
-	{
-		std::string label = "RetroAchievements - ";
-		label += m_account.account.saved ? m_account.account.username : Tr(Str::AccountSignIn);
-		m_fonts->AddText(ui, label.c_str(), margin, 290.0f * k, 34.0f * k, dim);
-	}
-	BuildTexturePackActivity(ui, margin, (m_cfg.achievements.state ? 350.0f : 290.0f) * k, k, accent); // 2026-10-05
-	BuildBiosLine(ui, W, k); // vk-285-134
-	BuildGameDbLine(ui, W, k); // gamedb (2026-10-30)
+	if (m_return_until > 0.0 && m_time - m_return_until < 0.4)
+		f.fade *= Smoothstep(0.0f, 0.4f, static_cast<float>(m_time - m_return_until));
 
-	// The settings page's QR tile, bottom right (vk-285-50). The code is dark on a light tile, as
-	// cameras expect; neighbouring dark modules are merged into runs and grown by a pixel so the
-	// rectangles' anti-aliased edges leave no seams between them. vk-285-51: smaller and dimmer (the
-	// user's choice: "less"); it still scans from a metre or so, and a phone keeps the page's key
-	// once it has opened it, so the code is mostly needed once.
-	const bool qr_shown = m_qr_size > 0;
-	const size_t qr_begin = ui.size();
-	if (qr_shown)
+	const bool sheet = m_sheet_anim > 0.5f || (exit_t >= 0.0 && exit_t < kSheetOut);
+	if (!sheet && exit_t >= 0.0) // P2-23: Home's fog comes up after the field has gone
+		f.fade *= Smoothstep(static_cast<float>(kSheetOut), static_cast<float>(kSheetOut) + 0.5f, static_cast<float>(exit_t));
+	const float account_e = Smoothstep(0.0f, 1.0f, m_account_anim);
+	if (S3Active()) // shelf v3 (AI-assisted)
+		S3Build(f, W, H, clock);
+	else if (sheet)
+		BuildSheetPs2(f, W, H, clock);
+	else if (account_e > 0.5f)
 	{
-		const float tile = 220.0f * k;
-		const int quiet = 4; // the standard quiet zone
-		const float mod = std::floor(tile / static_cast<float>(m_qr_size + 2 * quiet));
-		const float side = mod * static_cast<float>(m_qr_size + 2 * quiet);
-		const float tx = std::floor(W - margin - side), ty = std::floor(H - 150.0f * k - side);
-		Fonts::AddRoundedRect(ui, tx, ty, side, side, 12.0f * k, Rgba(0.60f, 0.59f, 0.66f));
-		const uint32_t ink = Rgba(0.07f, 0.06f, 0.16f);
-		const float grow = 0.4f; // enough to close the seams, little enough to keep the modules their size
-		for (int y = 0; y < m_qr_size; y++)
-			for (int x0 = 0; x0 < m_qr_size;)
-			{
-				if (!m_qr[static_cast<size_t>(y) * m_qr_size + x0])
-				{
-					x0++;
-					continue;
-				}
-				int x1 = x0;
-				while (x1 < m_qr_size && m_qr[static_cast<size_t>(y) * m_qr_size + x1])
-					x1++;
-				Fonts::AddRoundedRect(ui, tx + (x0 + quiet) * mod - grow, ty + (y + quiet) * mod - grow,
-					(x1 - x0) * mod + 2 * grow, mod + 2 * grow, 0.0f, ink);
-				x0 = x1;
-			}
-		// vk-285-52: no caption, the user's call ("qr is enough"); 51 had "Settings on your phone" and
-		// the address beside it.
-	}
-	else if (m_web_known)
-		m_fonts->AddText(ui, Tr(Str::NoNetwork), W - margin, H - 170.0f * k, 32.0f * k, faint, 0.1f, Fonts::Right);
-	const float sheet_e = Smoothstep(0.0f, 1.0f, m_sheet_anim);
-	FadeRange(ui, qr_begin, ui.size(), 1.0f - sheet_e); // vk-285-114: under the options sheet
-
-	const size_t title_begin = ui.size();
-	int scan_done = 0, scan_total = 0;
-	if (n > 0 && m_cfg.scan_progress && m_cfg.scan_progress(scan_done, scan_total))
-	{
-		// chdscan: a disc drive's entry came before the games: the scan's line goes above the shelf
-		char line[160];
-		std::snprintf(line, sizeof(line), Tr(Str::ShelfScanning), scan_done, scan_total);
-		m_fonts->AddText(ui, line, W * 0.5f, H * 0.12f, 44.0f * k, dim, 0.2f, Fonts::Center);
-	}
-	if (n > 0)
-	{
-		const GameInfo& g = m_games[static_cast<size_t>(m_selected)];
-		// Title, shrunk to fit (narrower beside the QR tile, which sits bottom right).
-		const float title_w = W * (qr_shown ? 0.72f : 0.8f);
-		float px = 96.0f * k;
-		while (px > 64.0f * k && m_fonts->Measure(g.title.c_str(), px) > title_w)
-			px -= 4.0f * k;
-		m_fonts->AddText(ui, g.title.c_str(), W * 0.5f, H * 0.842f, px, white, 0.55f, Fonts::Center);
-
-		// Details and badges on one centred row.
-		std::string info;
-		auto add = [&](const std::string& s) {
-			if (s.empty())
-				return;
-			if (!info.empty())
-				info += "   \xC2\xB7   ";
-			info += s;
-		};
-		add(g.serial);
-		add(Region(g.region)); // vk-285-110: the region names in the PS5's language
-		if (m_index[static_cast<size_t>(m_selected)] == kDumpIndex) // live-22 / 179: the disc being copied, with the live speed and the time left
-		{
-			char cp[48];
-			std::snprintf(cp, sizeof(cp), Tr(Str::CopyDumpPct), m_dump_pct);
-			add(cp);
-			if (m_dump_mbps > 0.05)
-			{
-				char r[32];
-				std::snprintf(r, sizeof(r), "%.1f MB/s", m_dump_mbps);
-				add(r);
-			}
-			if (m_dump_eta > 0)
-			{
-				char e[48];
-				if (m_dump_eta < 60)
-					std::snprintf(e, sizeof(e), "%s", Tr(Str::CopyEtaLessMin));
-				else
-					std::snprintf(e, sizeof(e), Tr(Str::CopyEtaMin), (m_dump_eta + 59) / 60);
-				add(e);
-			}
-			if (!m_dump_speed.empty())
-				add(m_dump_speed); // 179: the drive speed taken (8x / 3.2x)
-		}
-			else if (m_index[static_cast<size_t>(m_selected)] == kDriveIndex) // 2.11 (review): no size
-			add("In the drive");
-			else
-			add(SizeText(g.bytes));
-		if (!g.damaged.empty())
-			add("can't be read"); // vk-285-134
-		if (g.hidden)
-			add("hidden"); // vk-285-137
-		const float info_px = 44.0f * k, badge_px = 36.0f * k;
-		const float pad = 20.0f * k, gap = 16.0f * k;
-		float row_w = m_fonts->Measure(info.c_str(), info_px);
-		for (const std::string& b : g.badges)
-			row_w += gap + m_fonts->Measure(b.c_str(), badge_px) + 2 * pad;
-		float rx = W * 0.5f - row_w * 0.5f;
-		const float row_y = H * 0.905f;
-		rx += m_fonts->AddText(ui, info.c_str(), rx, row_y, info_px, dim, 0.1f);
-		for (const std::string& b : g.badges)
-		{
-			const float bw = m_fonts->Measure(b.c_str(), badge_px) + 2 * pad;
-			rx += gap;
-			Fonts::AddRoundedRect(ui, rx, row_y - 40.0f * k, bw, 54.0f * k, 27.0f * k, Rgba(1, 1, 1, 0.12f));
-			m_fonts->AddText(ui, b.c_str(), rx + pad, row_y - 2.0f * k, badge_px, white, 0.35f);
-			rx += bw;
-		}
+		SetupFog(f, 2, W, H);
+		BuildAccount(ui, W, H, k * kPanelScale, accent); // P2-12: drawn larger for the TV
 	}
 	else
-		{
-			int scan_done = 0, scan_total = 0;
-			if (m_cfg.scan_progress && m_cfg.scan_progress(scan_done, scan_total))
-			{
-				// chdscan: the games come when the images not seen before have been read
-				char line[160];
-				std::snprintf(line, sizeof(line), Tr(Str::ShelfScanning), scan_done, scan_total);
-				m_fonts->AddText(ui, line, W * 0.5f, H * 0.5f, 64.0f * k, white, 0.4f, Fonts::Center);
-			}
-			else if (m_search.applied.empty())
-			{
-				// 2026-10-16: with games folders set, the empty shelf names the first of them, not /data/PCSX2/games (a language file
-				// without that path in its line is shown as it is)
-				std::string none = Tr(Str::NoGames);
-				static const char kDefaultPath[] = "/data/PCSX2/games";
-				const size_t at = m_cfg.games_folder_note.empty() ? std::string::npos : none.find(kDefaultPath);
-				if (at != std::string::npos)
-				{
-					none.replace(at, sizeof(kDefaultPath) - 1, m_cfg.games_folder_note);
-					none = Fit(*m_fonts, none, 64.0f * k, W * 0.9f); // a long path is cut, not drawn off the screen
-				}
-				m_fonts->AddText(ui, none.c_str(), W * 0.5f, H * 0.5f, 64.0f * k, white, 0.4f, Fonts::Center);
-			}
-			else
-			{
-				// 2.11: a search with no match
-				m_fonts->AddText(ui, "No game matches", W * 0.5f, H * 0.47f, 64.0f * k, white, 0.4f, Fonts::Center);
-				m_fonts->AddText(ui, Fit(*m_fonts, "\xE2\x80\x9C" + m_search.text + "\xE2\x80\x9D", 48.0f * k, W * 0.7f).c_str(), W * 0.5f,
-					H * 0.53f, 48.0f * k, dim, 0.2f, Fonts::Center);
-			}
-		}
-	// vk-285-137: a note (a game hidden, hidden games shown or not), in the same place, unless a refusal came after it.
-	if (!m_note_text.empty() && m_time - m_note_time < 7.0 && m_note_time >= m_refused_time)
 	{
-		const float a = static_cast<float>(std::min(1.0, (7.0 - (m_time - m_note_time)) / 0.5));
-		m_fonts->AddText(ui, Fit(*m_fonts, m_note_text, 36.0f * k, W * 0.86f).c_str(), W * 0.5f, H * 0.775f, 36.0f * k,
-			Rgba(0.82f, 0.88f, 1.0f, a), 0.3f, Fonts::Center);
-	}
-	// vk-285-134: a pick refused for its image, for six seconds, just above the title.
-	else if (!m_refused_text.empty() && m_time - m_refused_time < 6.0)
-	{
-		const float a = static_cast<float>(std::min(1.0, (6.0 - (m_time - m_refused_time)) / 0.5));
-		m_fonts->AddText(ui, Fit(*m_fonts, m_refused_text, 36.0f * k, W * 0.8f).c_str(), W * 0.5f, H * 0.775f, 36.0f * k,
-			Rgba(1.0f, 0.78f, 0.55f, a), 0.3f, Fonts::Center);
-	}
-	FadeRange(ui, title_begin, ui.size(), 1.0f - sheet_e); // vk-285-114: the sheet shows the title itself
-
-	// vk-285-114: the options sheet, over a dimmed shelf.
-	if (m_sheet_anim > 0.001f)
-	{
-		Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.42f * sheet_e));
-		BuildSheet(ui, W, H, k, accent);
-		f.ui_images = m_achievement_images;
+		// P2-02: while the old screen fades out it is the one drawn, with its own timing.
+		const bool old = since < 0.0f;
+		const Screen show = old ? m_prev_screen : m_screen;
+		const double keep = m_screen_time;
+		if (old)
+			m_screen_time = m_prev_screen_time;
+		if (show == Screen::Home)
+			BuildHome(f, W, H, clock);
+		else if (show == Screen::Browser)
+			BuildBrowser(f, W, H, clock);
+		else
+			BuildLibrary(f, W, H, clock);
+		m_screen_time = keep;
+		FadeRange(ui, 0, ui.size(), screen_fade);
 	}
 
-	// 2026-10-05: the account panel's dim goes here, under the button hints (they are the panel's while it is open); the
-	// panel itself is drawn last (BuildAccount).
-	const float account_e = Smoothstep(0.0f, 1.0f, m_account_anim);
-	if (m_account_anim > 0.001f)
-		Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.86f * account_e));
-
-	// Button hints.
-	const float hy = H - 88.0f * k, ipx = 64.0f * k, tpx = 40.0f * k;
-	float hx = margin;
-	// A PromptFont glyph, or (names starting with '#') a shoulder button drawn as a small pill.
-	auto key = [&](const char* name) {
-		if (name[0] != '#')
-		{
-			hx += m_fonts->AddText(ui, name, hx, hy + 6.0f * k, ipx, white);
-			return;
-		}
-		const float kpx = 30.0f * k, kw = m_fonts->Measure(name + 1, kpx) + 26.0f * k, kh = 44.0f * k;
-		Fonts::AddRoundedRect(ui, hx, hy - 36.0f * k, kw, kh, 12.0f * k, Rgba(1, 1, 1, 0.9f));
-		m_fonts->AddText(ui, name + 1, hx + kw * 0.5f, hy - 4.0f * k, kpx, Rgba(0.08f, 0.08f, 0.14f), 0.6f, Fonts::Center);
-		hx += kw;
-	};
-	auto hint = [&](const char* key_a, const char* key_b, const char* label) {
-		key(key_a);
-		if (key_b)
-		{
-			hx += 8.0f * k;
-			key(key_b);
-		}
-		hx += 16.0f * k;
-		hx += m_fonts->AddText(ui, label, hx, hy, tpx, dim, 0.1f);
-		hx += 56.0f * k;
-	};
-	if (m_account.open)
+	// The account's buttons (its panel draws none of its own).
+	if (!sheet && account_e > 0.5f)
 	{
-		// 2026-10-05: the account panel's buttons (none while the PS5's keyboard is up: it shows its own).
+		ps2::Prompt p[6];
+		int n = 0;
 		const bool on_password = m_account.row == AchievementAccountPanel::RowPassword && !m_account.SignedIn();
 		const char* const show = Tr(m_account.show_password ? Str::HintHidePassword : Str::HintShowPassword);
 		if (m_ime_field >= 0 || m_account.account.busy)
 		{
-			// nothing to press
 		}
 		else if (m_account.editing)
 		{
-			hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
-			hint(icon::Cross, nullptr, Tr(Str::HintSelect));
-			hint(icon::Triangle, nullptr, Tr(Str::HintDelete));
+			p[n++] = {icon::Cross, Tr(Str::HintSelect)};
+			p[n++] = {icon::Triangle, Tr(Str::HintDelete)};
 			if (on_password)
-				hint(icon::Square, nullptr, show);
-			hint(icon::Circle, nullptr, Tr(Str::HintDone));
+				p[n++] = {icon::Square, show};
+			p[n++] = {icon::Circle, Tr(Str::HintDone)};
 		}
 		else
 		{
-			if (m_account.RowCount() > 1)
-				hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
 			const bool field = !m_account.SignedIn() && m_account.row != AchievementAccountPanel::RowSignIn;
-			hint(icon::Cross, nullptr, Tr(field ? Str::HintEdit : Str::HintSelect));
+			p[n++] = {icon::Cross, Tr(field ? Str::HintEdit : Str::HintSelect)};
 			if (on_password && !m_account.password.empty())
-				hint(icon::Square, nullptr, show);
-			hint(icon::Circle, nullptr, Tr(Str::HintBack));
+				p[n++] = {icon::Square, show};
+			p[n++] = {icon::Circle, Tr(Str::HintBack)};
 		}
-	}
-	else if ((m_sheet_open || m_sheet_anim > 0.5f) && m_sheet.tab() != kTabAchievements && m_cfg.texture_packs && !m_games.empty() &&
-			 m_sheet_row >= 0 && m_sheet_row < static_cast<int>(m_sheet.rows().size()) &&
-			 m_sheet.rows()[static_cast<size_t>(m_sheet_row)].kind == OptionsSheet::Kind::TexturePack)
-	{
-		// 2026-10-05: the HD texture pack row's buttons, for what it is doing now.
-		using TS = TexturePackStatus::State;
-		const TexturePackStatus st = m_cfg.texture_packs.status(m_games[static_cast<size_t>(m_selected)].serial);
-		const bool busy = st.state == TS::Queued || st.state == TS::Checking || st.state == TS::Downloading || st.state == TS::Verifying ||
-		                  st.state == TS::Unpacking;
-		const bool startable = !st.packs.empty() && (st.state == TS::Available || st.state == TS::Failed || st.state == TS::NeedSpace);
-		hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
-		if (startable && st.packs.size() > 1)
-			hint(icon::DpadLeftRight, nullptr, Tr(Str::HintChange));
-		if (startable || st.state == TS::Unavailable)
-			hint(icon::Cross, nullptr, Tr(Str::HintDownload));
-		if (busy || st.state == TS::Failed || st.state == TS::NeedSpace)
-			hint(icon::Triangle, nullptr, Tr(Str::HintCancel));
-		else if (st.state == TS::Installed && st.ours)
-			hint(icon::Triangle, nullptr, Tr(Str::HintDelete));
-		hint(icon::Circle, nullptr, Tr(Str::HintBack));
-	}
-	else if (m_search.typing && !m_search.system)
-	{
-		// 2.11: the search keyboard's buttons
-		hint(icon::DpadLeftRight, nullptr, "Move");
-		hint(icon::Cross, nullptr, "Type");
-		hint(icon::Square, nullptr, "Delete");
-		hint(icon::Triangle, nullptr, "Clear");
-		hint("#L1", "#R1", "Keys");
-		hint(icon::Circle, nullptr, "Done");
-	}
-	else if (m_sheet_open || m_sheet_anim > 0.5f)
-	{
-		// vk-285-114: the options sheet's buttons.
-		hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
-		hint(icon::DpadLeftRight, nullptr, Tr(Str::HintChange));
-		hint(icon::Triangle, nullptr, m_sheet.tab() == kTabAchievements ? Tr(Str::AchievementRefresh) : Tr(Str::HintReset));
-		hint(icon::Circle, nullptr, Tr(Str::HintBack));
-		if (n > 0)
-		{
-			const std::string scope = std::string(Tr(Str::SheetThisGame)) + " / " + Tr(Str::SheetAllGames);
-			hint("#L1", "#R1", scope.c_str());
-		}
-		const std::string tabs = std::string(Tr(Str::HintSettings)) + " / " + Tr(Str::SheetControls) + " / " + Tr(Str::Achievements); // vk-285-116
-		hint("#L2", "#R2", tabs.c_str());
-	}
-	else
-	{
-		hint(icon::Cross, nullptr, n > 0 && m_index[static_cast<size_t>(m_selected)] == kDriveIndex ? "Play or copy the disc" : Tr(Str::HintPlay)); // vk-285-110: hints in the PS5's language
-		// vk-285-69: the shelf opens with one game too (its QR code leads to the settings page and the
-		// logs); browsing needs two.
-		if (n > 1)
-		{
-			hint(icon::DpadLeftRight, nullptr, Tr(Str::HintBrowse));
-			hint("#L1", "#R1", Tr(Str::HintJump));
-		}
-		hint(icon::Square, nullptr, Tr(Str::HintSettings)); // vk-285-114
-		if (!m_qr_big)
-		{
-			hint("#R2", nullptr, "Search"); // 2.11
-			if (!m_search.applied.empty())
-				hint(icon::Circle, nullptr, "Show all");
-		}
-		if (m_cfg.achievements.state && !m_qr_big)
-			hint("#L1", icon::Square, "RetroAchievements");
-		if (m_qr_size > 0)
-			hint(icon::Triangle, nullptr, Tr(m_qr_big ? Str::HintBack : Str::HintQrCode));
+		ps2::Prompts(ui, *m_fonts, p, n, W - 110.0f * s, H - 70.0f * s, 36.0f * s, true);
 	}
 
-	std::string status = m_covers ? m_covers->Status() : std::string();
-	if (status.empty() && n > 0)
-	{
-		char buf[64];
-		std::snprintf(buf, sizeof(buf), "%d / %d", m_selected + 1, n);
-		status = buf;
-		if (!m_cfg.build_tag.empty())
-			status = m_cfg.build_tag + "   \xC2\xB7   " + status;
-	}
-	if (sheet_e < 0.5f && account_e < 0.5f)
-		m_fonts->AddText(ui, status.c_str(), W - margin, hy, 36.0f * k, faint, 0.1f, Fonts::Right);
-
-	// Test build 1 (vk-285-55): testing builds say so across the middle of the shelf, over the
-	// cases, with the build under it, so every photo and video of one names the build.
-	if (m_cfg.test_build > 0)
-	{
-		const float px = 300.0f * k, sub_px = 64.0f * k;
-		const float base = H * 0.5f + m_fonts->Ascent(px) * 0.36f;
-		m_fonts->AddText(ui, "TESTING", W * 0.5f + 5.0f * k, base + 5.0f * k, px, Rgba(0, 0, 0, 0.30f), 0.95f, Fonts::Center);
-		m_fonts->AddText(ui, "TESTING", W * 0.5f, base, px, Rgba(1, 1, 1, 0.42f), 0.95f, Fonts::Center);
-		float below = base + m_fonts->Descent(px); // the bottom of the last line drawn
-		if (!m_cfg.build_label.empty())
-		{
-			const float sub_base = below + sub_px * 1.1f;
-			m_fonts->AddText(ui, m_cfg.build_label.c_str(), W * 0.5f + 3.0f * k, sub_base + 3.0f * k, sub_px, Rgba(0, 0, 0, 0.45f),
-				0.5f, Fonts::Center);
-			m_fonts->AddText(ui, m_cfg.build_label.c_str(), W * 0.5f, sub_base, sub_px, Rgba(1, 1, 1, 0.75f), 0.5f, Fonts::Center);
-			below = sub_base + m_fonts->Descent(sub_px);
-		}
-		// vk-285-105: the Discord note, smaller, under the build.
-		if (!m_cfg.test_note.empty())
-		{
-			const float note_px = 44.0f * k, note_base = below + note_px * 1.25f;
-			m_fonts->AddText(ui, m_cfg.test_note.c_str(), W * 0.5f + 2.0f * k, note_base + 2.0f * k, note_px, Rgba(0, 0, 0, 0.45f),
-				0.5f, Fonts::Center);
-			m_fonts->AddText(ui, m_cfg.test_note.c_str(), W * 0.5f, note_base, note_px, Rgba(1, 1, 1, 0.75f), 0.5f, Fonts::Center);
-		}
-	}
-
-	// vk-285-118 (AI-assisted): the QR code large in the middle, black on white for any phone camera (Triangle).
+	// Web settings (Home): the settings page's QR code large in the middle, black on white for any phone camera.
 	if (m_qr_big_anim > 0.0f && m_qr_size > 0)
 	{
 		const float e = Smoothstep(0.0f, 1.0f, m_qr_big_anim);
+		// P2-08: a screen of its own, as every other one: Home's items no longer show through round the code. The frame dips
+		// as it swaps, like the sheets.
+		if (m_qr_big_anim > 0.5f)
+		{
+			ui.clear();
+			f.boxes.clear();
+			m_achievement_images.clear();
+		}
+		if (m_qr_big_anim < 1.0f)
+			f.fade *= 0.35f + 0.65f * std::fabs(2.0f * m_qr_big_anim - 1.0f);
 		const size_t begin = ui.size();
-		Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.80f));
+		Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.0f, 0.0f, 0.01f, 0.86f));
 		const int quiet = 4;
-		const float mod = std::floor(H * 0.62f / static_cast<float>(m_qr_size + 2 * quiet));
+		const float mod = std::floor(H * 0.56f / static_cast<float>(m_qr_size + 2 * quiet));
 		const float side = mod * static_cast<float>(m_qr_size + 2 * quiet);
 		const float tx = std::floor((W - side) * 0.5f), ty = std::floor((H - side) * 0.5f - 40.0f * k);
-		Fonts::AddRoundedRect(ui, tx, ty, side, side, 16.0f * k, Rgba(1.0f, 1.0f, 1.0f));
+		ps2::Glow(ui, W * 0.5f, ty + side * 0.5f, side * 0.9f, side * 0.9f, ps2::Rgba(0.4f, 0.7f, 1.0f, 0.25f), 2.0f);
+		Fonts::AddRoundedRect(ui, tx, ty, side, side, 6.0f * k, Rgba(1.0f, 1.0f, 1.0f));
 		const uint32_t ink = Rgba(0.0f, 0.0f, 0.0f);
 		for (int y = 0; y < m_qr_size; y++)
 			for (int x0 = 0; x0 < m_qr_size;)
@@ -2096,16 +1735,63 @@ void App::Build(FrameDesc& f, const std::string& clock)
 				Fonts::AddRoundedRect(ui, tx + (x0 + quiet) * mod - 0.4f, ty + (y + quiet) * mod - 0.4f, (x1 - x0) * mod + 0.8f, mod + 0.8f, 0.0f, ink);
 				x0 = x1;
 			}
+		ps2::Text(ui, *m_fonts, "Web Settings", W * 0.5f, ty - 40.0f * s, 46.0f * s, ps2::Yellow(), Fonts::Center);
+		ps2::Text(ui, *m_fonts, Fit(*m_fonts, m_web_shown.empty() ? m_web_url : m_web_shown, 30.0f * s, W * 0.8f).c_str(), W * 0.5f, ty + side + 56.0f * s,
+			30.0f * s, ps2::Detail(), Fonts::Center);
+		const ps2::Prompt back = {icon::Circle, "Back"};
+		ps2::Prompts(ui, *m_fonts, &back, 1, W - 110.0f * s, H - 110.0f * s, 38.0f * s, true);
 		FadeRange(ui, begin, ui.size(), e);
 	}
-	if (m_account_anim > 0.001f)
-		BuildAccount(ui, W, H, k, accent);
-	if (m_ask_anim > 0.001f)
-		BuildDiscAsk(ui, W, H, k, accent);
-	if (m_bios_anim > 0.001f)
-		BuildBiosChoice(ui, W, H, k, accent); // bioscheck
-	BuildSearch(ui, W, H, k, accent); // 2.11: the search line and its keyboard, over everything but the disc question
-	f.ui_images = m_achievement_images; // 2.11: the texture changes among the UI vertices (badges, the disc being copied)
+
+	// Test build 1 (vk-285-55): testing builds say so across the middle, with the build under it.
+	if (m_cfg.test_build > 0)
+	{
+		const float px = 300.0f * k, sub_px = 64.0f * k;
+		const float base = H * 0.5f + m_fonts->Ascent(px) * 0.36f;
+		m_fonts->AddText(ui, "TESTING", W * 0.5f, base, px, Rgba(1, 1, 1, 0.30f), 0.6f, Fonts::Center);
+		float below = base + m_fonts->Descent(px);
+		if (!m_cfg.build_label.empty())
+		{
+			const float sub_base = below + sub_px * 1.1f;
+			ps2::Text(ui, *m_fonts, m_cfg.build_label.c_str(), W * 0.5f, sub_base, sub_px, ps2::White(0.75f), Fonts::Center);
+			below = sub_base + m_fonts->Descent(sub_px);
+		}
+		if (!m_cfg.test_note.empty())
+			ps2::Text(ui, *m_fonts, m_cfg.test_note.c_str(), W * 0.5f, below + 44.0f * k * 1.25f, 44.0f * k, ps2::White(0.75f), Fonts::Center);
+	}
+
+	if (m_ask_anim > 0.5f && S3Active()) // shelf v3 (AI-assisted): the question as the Browser's save menu
+		S3DiscAskBuild(f);
+	else if (m_ask_anim > 0.5f)
+		BuildDiscAskPs2(f, W, H); // the disc's own screen, over everything but the BIOS question
+	if (m_bios_anim > 0.5f) // bioscheck; ps2-console-shelf: the whole display
+	{
+		SetupFog(f, 0, W, H);
+		ui.clear();
+		f.boxes.clear();
+		m_achievement_images.clear(); // (the texture ranges of the vertices just dropped)
+		BuildBiosChoice(ui, W, H, k, accent);
+	}
+	if (!sheet && account_e < 0.5f && m_screen == Screen::Library && !S3Active()) // shelf v3: its own search
+	{
+		BuildSearch(ui, W, H, k * kPanelScale, accent); // P2-12: larger; // 2.11: the search line and its keyboard
+		if (m_search.typing && !m_search.system && m_search.kb_w > 0)
+		{
+			// P2-22 (kurolume: "centralise them under the keyboard"): the row centred under the keyboard, sliding with it, no wider than it.
+			const ps2::Prompt p[] = {{icon::Cross, "Type"}, {icon::Square, "Delete"}, {icon::Triangle, "Clear"}, {"#L1 R1", "Keys"}, {icon::Circle, "Done"}};
+			float px = 30.0f * s;
+			const float pw = ps2::PromptsWidth(*m_fonts, p, 5, px);
+			if (pw > m_search.kb_w && pw > 0)
+				px *= m_search.kb_w / pw;
+			const float cx = m_search.kb_x + m_search.kb_w * 0.5f;
+			const size_t begin = ui.size();
+			ps2::Prompts(ui, *m_fonts, p, 5, cx - ps2::PromptsWidth(*m_fonts, p, 5, px) * 0.5f, m_search.kb_y + m_search.kb_h + 62.0f * s, px, false);
+			FadeRange(ui, begin, ui.size(), Clamp(m_search.kb_anim * 1.5f, 0.0f, 1.0f));
+		}
+	}
+	// shelf v3 (AI-assisted): keep the v3 kit's texture ranges, with the badges', in vertex order.
+	f.ui_images.insert(f.ui_images.end(), m_achievement_images.begin(), m_achievement_images.end());
+	std::sort(f.ui_images.begin(), f.ui_images.end(), [](const UiImageRange& a, const UiImageRange& b) { return a.first < b.first; });
 }
 
 // ---- vk-285-114: the options sheet ---------------------------------------------------------------------------------
@@ -2191,14 +1877,11 @@ namespace
 		name = s.substr(5);
 		return true;
 	}
-	// The symbol's size against the text's, and how far its baseline drops (of the text's size) to sit centred on the text.
-	constexpr float kSymbolScale = 1.35f, kSymbolDrop = 0.12f;
 
-	// The sheet's measures, in 2160-line pixels (scaled by k when drawn).
-	constexpr float kSheetW = 1520.0f, kSheetTop = 206.0f, kSheetBottomGap = 222.0f; // 2026-10-05: 1260 before
-	constexpr float kSheetListTop = 308.0f; // from the sheet's top (vk-285-117: the top is one line shorter)
-	constexpr float kSheetHelpH = 352.0f; // the help box at the bottom
-	constexpr float kRowH = 100.0f, kHeaderH = 84.0f; // 2026-10-05: 94 and 76 before
+	// The folder picker's measures, in 2160-line pixels (scaled by k when drawn).
+	constexpr float kSheetListTop = 308.0f; // from the panel's top
+	constexpr float kSheetHelpH = 352.0f;   // the help box at the bottom
+	constexpr float kRowH = 100.0f;
 } // namespace
 
 void App::OpenSheet(bool global)
@@ -2217,6 +1900,7 @@ void App::OpenSheet(bool global)
 	m_sheet.SetUpdateRows(static_cast<bool>(m_cfg.updates) && m_cfg.own_tile_game.empty()); // 180: not in a game tile's copy (it updates the main app)
 	m_sheet.SetReloadTileRow(static_cast<bool>(m_cfg.reload_tile_on) && static_cast<bool>(m_cfg.set_reload_tile) && m_cfg.own_tile_game.empty()); // b185
 	m_sheet.SetFolderRows(!m_cfg.folder_places.empty());                // vk-285-135
+	m_sheet.SetWebSettingsRow(true);                                    // P2-16: was a Home item
 	m_tile_row = HomeTileEligible(g);                                   // 2.12: the Home screen tile row (a game with a plain image file; the flag turns it on)
 	m_sheet.SetHomeTileRow(m_tile_row);
 	m_sheet.SetHideRow(!g || m_index[static_cast<size_t>(m_selected)] >= 0); // gamedb (2026-10-30): not on a disc entry's sheet
@@ -2236,6 +1920,8 @@ void App::OpenSheet(bool global)
 	if (!m_sheet_open)
 	{
 		m_sheet_open = true;
+		m_sheet_open_time = m_time; // P2-19: the field comes in (L1/R1 and L2/R2 keep it going)
+		m_sheet_over_home = m_screen == Screen::Home; // P2-23
 		m_sheet_scroll = m_sheet_scroll_target = 0;
 	}
 	// 2.12: the Home screen tile row is for this game from now on; the helper's state is looked at once, now, so the row shows the truth from its first frame.
@@ -2250,7 +1936,9 @@ void App::OpenSheet(bool global)
 	}
 	else
 		m_tile_path.clear();
-	// The first row that can be picked.
+	// The first row that can be picked (P2-20: on the list of sections, the first).
+	m_sheet_level = 0;
+	m_sheet_section = 0;
 	m_sheet_row = 0;
 	const auto& rows = m_sheet.rows();
 	while (m_sheet_row < static_cast<int>(rows.size()) && !m_sheet.Selectable(rows[static_cast<size_t>(m_sheet_row)]))
@@ -2272,6 +1960,8 @@ void App::SheetTab(int tab)
 		m_cfg.game_achievements.cancel();
 	if (tab == kTabAchievements)
 		LoadGameAchievements();
+	m_sheet_level = 0; // P2-20
+	m_sheet_section = 0;
 	m_sheet_row = 0;
 	const auto& rows = m_sheet.rows();
 	while (m_sheet_row < static_cast<int>(rows.size()) && !m_sheet.Selectable(rows[static_cast<size_t>(m_sheet_row)]))
@@ -2331,6 +2021,7 @@ void App::CloseSheet()
 	if (!m_sheet_open)
 		return;
 	m_sheet_open = false;
+	m_sheet_close_time = m_time; // P2-23: the way back to Home plays the way in backwards
 	m_picker.open = false; // vk-285-135
 	if (m_cfg.game_achievements.cancel)
 		m_cfg.game_achievements.cancel();
@@ -2360,6 +2051,130 @@ bool App::SheetMove(int dir)
 	return true;
 }
 
+// P2-20: the sections of the Settings page: its option groups merged into a few, as System Configuration keeps to a short list.
+// A group not named here (a new one) goes under System. The Controls page keeps its own groups, one section each.
+namespace
+{
+const char* SettingsSectionOf(const std::string& group)
+{
+	static const struct
+	{
+		const char* group;
+		const char* section;
+	} kMap[] = {{"Display", "Picture"}, {"Graphics", "Picture"}, {"Crop", "Picture"}, {"On screen", "Picture"},
+		{"Performance", "Speed and fixes"}, {"Hardware fixes", "Speed and fixes"}, {"Game", "Game"}, {"Discs", "Game"}, {"ELF", "Game"},
+		{"Patches", "Game"}, {"Cheats", "Game"}, {"Memory cards", "Memory cards"}, {"Shelf", "Shelf"}, {"Home screen", "Shelf"}};
+	for (const auto& m : kMap)
+		if (group == m.group)
+			return m.section;
+	return "System"; // Folders, Network, PS2, PS5SX2's updates
+}
+constexpr const char* kSettingsSections[] = {"Picture", "Speed and fixes", "Game", "Memory cards", "Shelf", "System"};
+} // namespace
+
+void App::SheetSections()
+{
+	const auto& rows = m_sheet.rows();
+	const bool settings = m_sheet.tab() == kTabSettings;
+	m_sections.clear();
+	std::vector<SheetSection> named, tail;
+	std::vector<std::vector<std::string>> groups; // each named section's groups
+	std::string group;
+	bool headed = false, end = false;
+	for (int i = 0; i < static_cast<int>(rows.size()); i++)
+	{
+		const OptionsSheet::Row& r = rows[static_cast<size_t>(i)];
+		if (r.kind == OptionsSheet::Kind::Header)
+		{
+			group = r.label;
+			headed = true;
+			end = r.label.empty(); // the reset row's
+			continue;
+		}
+		if (!m_sheet.Selectable(r))
+			continue;
+		if (!headed || end) // Recommended (before any group) and the reset row: a section of their own
+		{
+			SheetSection one;
+			std::string glyph, name;
+			one.name = SplitSymbol(r.label, glyph, name) ? name : r.label;
+			one.rows.push_back(i);
+			(headed ? tail : m_sections).push_back(std::move(one));
+			continue;
+		}
+		const std::string section = settings ? SettingsSectionOf(group) : group;
+		size_t at = 0;
+		while (at < named.size() && named[at].name != section)
+			at++;
+		if (at == named.size())
+		{
+			named.push_back({section, {}, {}});
+			groups.emplace_back();
+		}
+		named[at].rows.push_back(i);
+		if (std::find(groups[at].begin(), groups[at].end(), group) == groups[at].end())
+			groups[at].push_back(group);
+	}
+	for (size_t i = 0; i < named.size(); i++) // the summary under a section's name: what is in it
+	{
+		if (groups[i].size() > 1)
+			for (const std::string& g : groups[i])
+				named[i].summary += (named[i].summary.empty() ? "" : "  \xC2\xB7  ") + g;
+		else
+			named[i].summary = std::to_string(named[i].rows.size()) + (named[i].rows.size() == 1 ? " setting" : " settings");
+	}
+	if (settings)
+	{
+		auto rank = [](const std::string& n) {
+			for (size_t k = 0; k < std::size(kSettingsSections); k++)
+				if (n == kSettingsSections[k])
+					return static_cast<int>(k);
+			return static_cast<int>(std::size(kSettingsSections));
+		};
+		std::stable_sort(named.begin(), named.end(), [&](const SheetSection& a, const SheetSection& b) { return rank(a.name) < rank(b.name); });
+	}
+	for (SheetSection& n : named)
+		m_sections.push_back(std::move(n));
+	for (SheetSection& n : tail)
+		m_sections.push_back(std::move(n));
+	if (m_sections.empty())
+	{
+		m_sheet_level = 0;
+		m_sheet_section = 0;
+		return;
+	}
+	m_sheet_section = std::clamp(m_sheet_section, 0, static_cast<int>(m_sections.size()) - 1);
+	const std::vector<int>& in = m_sections[static_cast<size_t>(m_sheet_section)].rows;
+	if (in.size() == 1)
+		m_sheet_level = 0;
+	// On the list the focus is the section's first row; in a section it stays on one of the section's rows.
+	if (m_sheet_level == 0 || std::find(in.begin(), in.end(), m_sheet_row) == in.end())
+		m_sheet_row = in.front();
+}
+
+bool App::SheetStep(int dir)
+{
+	SheetSections();
+	if (m_sections.empty())
+		return SheetMove(dir);
+	if (m_sheet_level == 0)
+	{
+		const int to = m_sheet_section + dir;
+		if (to < 0 || to >= static_cast<int>(m_sections.size()))
+			return false;
+		m_sheet_section = to;
+		m_sheet_row = m_sections[static_cast<size_t>(to)].rows.front();
+		return true;
+	}
+	const std::vector<int>& in = m_sections[static_cast<size_t>(m_sheet_section)].rows;
+	const auto it = std::find(in.begin(), in.end(), m_sheet_row);
+	const int to = static_cast<int>(it == in.end() ? 0 : it - in.begin()) + dir;
+	if (to < 0 || to >= static_cast<int>(in.size()))
+		return false;
+	m_sheet_row = in[static_cast<size_t>(to)];
+	return true;
+}
+
 void App::UpdateSheet(double dt, const Input& in)
 {
 	auto pressed = [&](bool now, bool before) { return now && !before; };
@@ -2371,6 +2186,18 @@ void App::UpdateSheet(double dt, const Input& in)
 		return;
 	}
 	m_sheet_row = std::max(0, std::min(m_sheet_row, static_cast<int>(rows.size()) - 1));
+	if (m_sheet.tab() != kTabAchievements)
+		SheetSections(); // P2-20
+	// P2-16: the web settings QR page, opened from its row, over the sheet; Circle, Cross or Triangle go back to the sheet.
+	if (m_qr_big)
+	{
+		if (pressed(in.circle, m_prev.circle) || pressed(in.triangle, m_prev.triangle) || pressed(in.cross, m_prev.cross))
+		{
+			m_qr_big = false;
+			Sound(Sfx::Close, 0.0f);
+		}
+		return;
+	}
 
 	// 2026-10-05: a texture pack that came in while the sheet is open: the game's file has Texture replacements on now.
 	if (m_cfg.texture_packs && !m_sheet_global && !m_games.empty())
@@ -2405,27 +2232,22 @@ void App::UpdateSheet(double dt, const Input& in)
 		UpdatePicker(dt, in);
 		return;
 	}
+	// P2-20: Circle in a section goes back to the list of sections (Square and Options still close the sheet).
+	if (m_sheet_level == 1 && pressed(in.circle, m_prev.circle))
+	{
+		m_sheet_level = 0;
+		SheetSections();
+		Sound(Sfx::Back, 0.3f);
+		return;
+	}
 	if (pressed(in.circle, m_prev.circle) || pressed(in.square, m_prev.square) || pressed(in.options, m_prev.options))
 	{
 		CloseSheet();
-		Sound(Sfx::Move, 0.3f);
+		Sound(Sfx::Close, 0.3f);
 		return;
 	}
-	if ((pressed(in.l1, m_prev.l1) || pressed(in.r1, m_prev.r1)) && !m_games.empty())
-	{
-		const bool global = pressed(in.r1, m_prev.r1);
-		if (global != m_sheet_global)
-		{
-			const int saved = m_sheet.saved();
-			if (saved > 0)
-				RefreshBadges();
-			OpenSheet(global);
-			Sound(global ? Sfx::JumpRight : Sfx::JumpLeft, global ? 0.3f : -0.1f);
-		}
-		else
-			Sound(Sfx::Edge, 0.3f);
-		return;
-	}
+	// P2-20b: L1 / R1 no longer switch between This game and All games: a game's sheet is that game's only; the settings for
+	// all games are Home's System Configuration.
 	// vk-285-116: L2 the settings, R2 the controls.
 	// pr9n (AI-assisted), PR #9 review item 11: no wrapping. From Settings, L2 went round to Achievements, which starts
 	// network traffic; the tabs stop at either end now.
@@ -2464,7 +2286,7 @@ void App::UpdateSheet(double dt, const Input& in)
 	const bool v_fresh = (in.up && !m_prev.up) || (in.down && !m_prev.down);
 	if (v != 0 && v_fresh)
 	{
-		Sound(SheetMove(v) ? Sfx::Move : Sfx::Edge, 0.3f);
+		Sound(SheetStep(v) ? Sfx::Move : Sfx::Edge, 0.3f); // P2-20: at the level shown
 		m_sheet_held_v = v;
 		m_sheet_held_for = 0;
 		m_sheet_next_repeat = 0.34;
@@ -2475,7 +2297,7 @@ void App::UpdateSheet(double dt, const Input& in)
 		bool moved = false;
 		while (m_sheet_held_for >= m_sheet_next_repeat)
 		{
-			moved |= SheetMove(v);
+			moved |= SheetStep(v);
 			m_sheet_next_repeat += 0.085;
 		}
 		if (moved)
@@ -2483,6 +2305,19 @@ void App::UpdateSheet(double dt, const Input& in)
 	}
 	else
 		m_sheet_held_v = 0;
+
+	// P2-20: on the list of sections Cross goes into the focused one; nothing else acts there (a section of one row acts below,
+	// from the list itself).
+	if (m_sheet_level == 0 && !m_sections.empty() && m_sections[static_cast<size_t>(m_sheet_section)].rows.size() > 1)
+	{
+		if (pressed(in.cross, m_prev.cross))
+		{
+			m_sheet_level = 1;
+			m_sheet_row = m_sections[static_cast<size_t>(m_sheet_section)].rows.front();
+			Sound(Sfx::Select, 0.3f);
+		}
+		return;
+	}
 
 	const OptionsSheet::Row& row = rows[static_cast<size_t>(m_sheet_row)];
 	auto after = [&](bool changed) {
@@ -2566,6 +2401,26 @@ void App::UpdateSheet(double dt, const Input& in)
 		const bool horizontal = (in.left && !m_prev.left) || (in.right && !m_prev.right);
 		if (pressed(in.cross, m_prev.cross) || (horizontal && row.kind == OptionsSheet::Kind::LogUpload))
 			UpdateRowPress(row, now);
+		return;
+	}
+
+	// P2-16: "Web Settings": Cross shows the settings page's QR code full screen (P2-08's page), or says there is no network.
+	if (row.kind == OptionsSheet::Kind::WebSettings)
+	{
+		if (pressed(in.cross, m_prev.cross))
+		{
+			if (m_qr_size > 0)
+			{
+				m_qr_big = true;
+				Sound(Sfx::Open, 0.0f);
+			}
+			else
+			{
+				m_sheet_status = Tr(Str::NoNetwork);
+				m_sheet_status_time = now;
+				Sound(Sfx::Error, 0.0f);
+			}
+		}
 		return;
 	}
 
@@ -3162,28 +3017,31 @@ std::string App::TexturePackHelp(const TexturePackStatus& s, int pick, const std
 // found instead under it. It lights up for a moment when a pick was refused.
 void App::BuildBiosLine(std::vector<UiVertex>& ui, float W, float k)
 {
+	// ps2-console-shelf (AI-assisted): no box: two warm lines low in the middle of the screen, above the prompts, brighter for a moment
+	// when a pick was refused for want of a BIOS.
+	const float H = k * 2160.0f, s = H / 1080.0f;
+	const uint32_t warm = ps2::Rgba(0.98f, 0.80f, 0.55f);
 	if (!m_bios_missing && m_bios_open_in_use) // bioscheck: the open BIOS is named while games start with it
 	{
 		char note[160];
 		std::snprintf(note, sizeof(note), Tr(Str::BiosInUse), "OpenPS2BIOS (experimental)");
-		m_fonts->AddText(ui, note, W * 0.5f, 250.0f * k, 28.0f * k, Rgba(0.95f, 0.78f, 0.52f, 0.85f), 0.2f, Fonts::Center);
+		ps2::Text(ui, *m_fonts, note, W * 0.5f, H - 40.0f * s, 22.0f * s, ps2::Alpha(warm, 0.8f), Fonts::Center);
 		return;
 	}
 	if (!m_bios_missing)
 		return;
 	const float since = static_cast<float>(m_time - m_bios_refused);
 	const float flash = since >= 0.0f && since < 1.6f ? 1.0f - since / 1.6f : 0.0f;
-	const float w = 2000.0f * k, x = W * 0.5f - w * 0.5f, y = 222.0f * k, h = m_bios_problem.empty() && !m_cfg.open_bios_bundled ? 96.0f * k : 150.0f * k;
-	Fonts::AddRoundedRect(ui, x, y, w, h, 24.0f * k, Rgba(0.42f + 0.25f * flash, 0.20f + 0.08f * flash, 0.04f, 0.88f));
 	char head[320];
 	std::snprintf(head, sizeof(head), Tr(Str::ShelfNoBios), m_cfg.bios_dir.c_str());
-	const float hpx = 40.0f * k, dpx = 32.0f * k;
-	m_fonts->AddText(ui, Fit(*m_fonts, head, hpx, w - 60.0f * k).c_str(), W * 0.5f, y + 60.0f * k, hpx, Rgba(1, 1, 1), 0.4f, Fonts::Center);
-	// bioscheck: with the open BIOS in the build, the line says a pick asks what to do (rather than what was found instead)
+	const float y = H - 196.0f * s;
+	if (flash > 0.0f)
+		ps2::Glow(ui, W * 0.5f, y - 10.0f * s, W * 0.36f, 60.0f * s, ps2::Rgba(1.0f, 0.55f, 0.2f, 0.35f * flash), 2.0f);
+	ps2::Text(ui, *m_fonts, Fit(*m_fonts, head, 28.0f * s, W * 0.9f).c_str(), W * 0.5f, y, 28.0f * s, warm, Fonts::Center);
 	const std::string second = m_cfg.open_bios_bundled ? std::string(Tr(Str::ShelfNoBiosChoice)) : m_bios_problem;
 	if (!second.empty())
-		m_fonts->AddText(ui, Fit(*m_fonts, second, dpx, w - 60.0f * k).c_str(), W * 0.5f, y + 116.0f * k, dpx,
-			Rgba(1.0f, 0.86f, 0.62f), 0.2f, Fonts::Center);
+		ps2::Text(ui, *m_fonts, Fit(*m_fonts, second, 24.0f * s, W * 0.9f).c_str(), W * 0.5f, y + 34.0f * s, 24.0f * s, ps2::Alpha(warm, 0.8f),
+			Fonts::Center);
 }
 
 // gamedb (2026-10-30, AI-assisted): resources/GameIndex.yaml is missing or unusable: one line under where the BIOS line goes (below it when
@@ -3195,31 +3053,12 @@ void App::BuildGameDbLine(std::vector<UiVertex>& ui, float W, float k)
 		return;
 	char note[400];
 	std::snprintf(note, sizeof(note), Tr(Str::ShelfNoGameDb), m_cfg.gamedb_missing.c_str());
-	const float y = m_bios_missing ? 200.0f : m_bios_open_in_use ? 296.0f : 250.0f; // with the BIOS box up, just above it (under it is the case)
-	const float px = 28.0f * k;
-	m_fonts->AddText(ui, Fit(*m_fonts, note, px, 2000.0f * k).c_str(), W * 0.5f, y * k, px, Rgba(0.95f, 0.78f, 0.52f, 0.85f), 0.2f, Fonts::Center);
+	// ps2-console-shelf: a quiet warm line at the foot of the screen (over the BIOS lines when they are up).
+	const float H = k * 2160.0f, s = H / 1080.0f;
+	const float y = m_bios_missing ? H - 236.0f * s : H - 40.0f * s;
+	ps2::Text(ui, *m_fonts, Fit(*m_fonts, note, 22.0f * s, W * 0.9f).c_str(), W * 0.5f, y, 22.0f * s, ps2::Rgba(0.98f, 0.80f, 0.55f, 0.8f), Fonts::Center);
 }
 
-void App::BuildTexturePackActivity(std::vector<UiVertex>& ui, float x, float y, float k, uint32_t accent)
-{
-	using State = TexturePackStatus::State;
-	if (!m_cfg.texture_packs || !m_cfg.texture_packs.activity)
-		return;
-	const TexturePackActivity a = m_cfg.texture_packs.activity();
-	if (!a.active)
-		return;
-	const bool measured = a.state == State::Checking || a.state == State::Downloading || a.state == State::Unpacking;
-	std::string line = std::string(Tr(Str::HdTextures)) + ": " + a.title;
-	if (measured)
-		line += "  \xC2\xB7  " + std::to_string(static_cast<int>(a.fraction * 100.0)) + "%";
-	if (a.waiting > 0)
-		line += "  (+" + std::to_string(a.waiting) + ")";
-	const float px = 30.0f * k, w = 460.0f * k;
-	m_fonts->AddText(ui, Fit(*m_fonts, line, px, 900.0f * k).c_str(), x, y, px, Rgba(0.72f, 0.69f, 0.82f), 0.1f);
-	Fonts::AddRoundedRect(ui, x, y + 16.0f * k, w, 6.0f * k, 3.0f * k, Rgba(1, 1, 1, 0.10f));
-	if (measured && a.fraction > 0)
-		Fonts::AddRoundedRect(ui, x, y + 16.0f * k, std::max(6.0f * k, w * static_cast<float>(a.fraction)), 6.0f * k, 3.0f * k, accent);
-}
 
 // Achievement data and textures are owned by the shelf, never by the VM. (AI-assisted)
 void App::ClearAchievementBadges()
@@ -3375,303 +3214,6 @@ void App::BuildGameAchievements(std::vector<UiVertex>& ui, float x, float y, flo
 	m_fonts->AddText(ui, footer.c_str(), x, y + height - 10 * k, 28 * k, muted);
 }
 
-void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent)
-{
-	const float e = Smoothstep(0.0f, 1.0f, m_sheet_anim);
-	const float sw = kSheetW * k, top = kSheetTop * k, sh = H - top - kSheetBottomGap * k;
-	const float margin = 110.0f * k;
-	const float x = W - margin - sw + (1.0f - e) * (sw + margin + 60.0f * k);
-	const float y = top;
-	const size_t begin = ui.size();
-
-	const uint32_t hi = Rgba(1, 1, 1), mid = Rgba(0.74f, 0.72f, 0.84f), lo = Rgba(0.52f, 0.50f, 0.64f);
-	const uint32_t own = Rgba(Mix(m_glow[0], 1.0f, 0.45f), Mix(m_glow[1], 1.0f, 0.45f), Mix(m_glow[2], 1.0f, 0.45f));
-
-	// The panel: a soft shadow, a hairline edge, the body.
-	Fonts::AddRoundedRect(ui, x - 6 * k, y + 10 * k, sw + 12 * k, sh + 12 * k, 48 * k, Rgba(0, 0, 0, 0.35f));
-	Fonts::AddRoundedRect(ui, x - 2 * k, y - 2 * k, sw + 4 * k, sh + 4 * k, 44 * k, Rgba(1, 1, 1, 0.16f));
-	Fonts::AddRoundedRect(ui, x, y, sw, sh, 42 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f)); // the shelf's text must not show through
-
-	const float cx = x + 64 * k, inner = sw - 128 * k;
-	// 2026-10-05 (AI-assisted; swordpdf: "the square ui in general is a little cramped"): a wider sheet, and its top in two
-	// lines that each have room: the title with this game / all games (L1 / R1) on the right, then the tabs (L2 / R2) as one
-	// strip across the sheet, the shown tab a white pill as the shown scope. vk-285-117's title kept its line to itself;
-	// the strip below now holds the three tabs that used to share a line with the scope.
-	const char* const this_label = Tr(Str::SheetThisGame);
-	const char* const all_label = Tr(Str::SheetAllGames);
-	const float ph = 60 * k, ppx = 30 * k, pad = 50 * k, pgap = 14 * k;
-	const float this_w = m_fonts->Measure(this_label, ppx) + pad, all_w = m_fonts->Measure(all_label, ppx) + pad;
-	const float pills_w = this_w + pgap + all_w;
-	{
-		const float room = inner - pills_w - 48 * k;
-		float px = 52 * k;
-		const std::string& t = m_sheet.title();
-		while (px > 40 * k && m_fonts->Measure(t.c_str(), px) > room)
-			px -= 2 * k;
-		m_fonts->AddText(ui, Fit(*m_fonts, t, px, room).c_str(), cx, y + 112 * k, px, hi, 0.55f);
-	}
-	{
-		const float py = y + 66 * k;
-		float px = cx + inner - pills_w;
-		auto pill = [&](const char* label, float w, bool on, bool enabled) {
-			if (on)
-				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, 0.92f));
-			else
-				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, enabled ? 0.10f : 0.04f));
-			m_fonts->AddText(ui, label, px + w * 0.5f, py + ph * 0.5f + 11 * k, ppx, on ? Rgba(0.07f, 0.06f, 0.16f) : (enabled ? mid : lo),
-				0.5f, Fonts::Center);
-			px += w + pgap;
-		};
-		pill(this_label, this_w, !m_sheet_global, !m_games.empty());
-		pill(all_label, all_w, m_sheet_global, true);
-	}
-	{
-		// The tab strip: [L2] Settings | Controls | Achievements [R2], each tab a third of the room between the keys.
-		const float ty = y + 168 * k, th = 74 * k, kpx = 24 * k, tpx = 32 * k;
-		Fonts::AddRoundedRect(ui, cx, ty, inner, th, th * 0.5f, Rgba(1, 1, 1, 0.05f));
-		const float kh = 40 * k;
-		auto key_pill = [&](const char* name, float kx) {
-			const float kw = m_fonts->Measure(name, kpx) + 20 * k;
-			Fonts::AddRoundedRect(ui, kx, ty + (th - kh) * 0.5f, kw, kh, 10 * k, Rgba(1, 1, 1, 0.82f));
-			m_fonts->AddText(ui, name, kx + kw * 0.5f, ty + th * 0.5f + 9 * k, kpx, Rgba(0.08f, 0.08f, 0.14f), 0.6f, Fonts::Center);
-			return kw;
-		};
-		const float l2 = key_pill("L2", cx + 16 * k);
-		const float r2w = m_fonts->Measure("R2", kpx) + 20 * k;
-		key_pill("R2", cx + inner - 16 * k - r2w);
-		const float sx0 = cx + 16 * k + l2 + 14 * k, sx1 = cx + inner - 16 * k - r2w - 14 * k;
-		const float seg = (sx1 - sx0) / 3.0f;
-		const int shown = m_sheet.tab() == kTabControls ? 1 : m_sheet.tab() == kTabAchievements ? 2 : 0;
-		const char* const names[3] = {Tr(Str::HintSettings), Tr(Str::SheetControls), Tr(Str::Achievements)};
-		for (int t = 0; t < 3; t++)
-		{
-			const float sx = sx0 + t * seg;
-			const bool on = t == shown;
-			if (on)
-				Fonts::AddRoundedRect(ui, sx + 4 * k, ty + 7 * k, seg - 8 * k, th - 14 * k, (th - 14 * k) * 0.5f, Rgba(1, 1, 1, 0.92f));
-			const std::string label = Fit(*m_fonts, names[t], tpx, seg - 36 * k);
-			m_fonts->AddText(ui, label.c_str(), sx + seg * 0.5f, ty + th * 0.5f + 11 * k, tpx, on ? Rgba(0.07f, 0.06f, 0.16f) : mid,
-				on ? 0.5f : 0.3f, Fonts::Center);
-		}
-	}
-	Fonts::AddRoundedRect(ui, cx, y + 280 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
-
-	if (m_sheet.tab() == kTabAchievements)
-	{
-		BuildGameAchievements(ui, cx, y + 310 * k, inner, sh - 370 * k, k, accent);
-		FadeRange(ui, begin, ui.size(), e);
-		return;
-	}
-
-	// vk-285-135: the folder picker, in the rows' place.
-	if (m_picker.open)
-	{
-		BuildPicker(ui, x, sw, y, sh, k, accent);
-		FadeRange(ui, begin, ui.size(), Clamp(e * 1.4f, 0.0f, 1.0f));
-		if (m_picker.osk) // vk-285-139: the panel's keyboard for a share's address, over the shelf
-			BuildPickerKeyboard(ui, W, H, k, accent);
-		return;
-	}
-
-	// The rows: a list that scrolls to keep the focused row in view.
-	const auto& rows = m_sheet.rows();
-	const float list_top = y + kSheetListTop * k, list_bottom = y + sh - kSheetHelpH * k;
-	const float view_h = (list_bottom - list_top) / k;
-	std::vector<float> offs(rows.size());
-	float acc = 0, focus_top = 0, focus_bottom = 0;
-	for (size_t i = 0; i < rows.size(); i++)
-	{
-		offs[i] = acc;
-		const float hgt = rows[i].kind == OptionsSheet::Kind::Header ? (rows[i].label.empty() ? 30.0f : kHeaderH) : kRowH;
-		if (static_cast<int>(i) == m_sheet_row)
-		{
-			// The header just above the focused row comes into view with it.
-			focus_top = (i > 0 && rows[i - 1].kind == OptionsSheet::Kind::Header) ? offs[i - 1] : acc;
-			focus_bottom = acc + hgt;
-		}
-		acc += hgt;
-	}
-	const float total = acc;
-	if (focus_top < m_sheet_scroll_target + 20.0f)
-		m_sheet_scroll_target = std::max(0.0f, focus_top - 20.0f);
-	if (focus_bottom > m_sheet_scroll_target + view_h - 20.0f)
-		m_sheet_scroll_target = focus_bottom - view_h + 20.0f;
-	m_sheet_scroll_target = std::max(0.0f, std::min(m_sheet_scroll_target, std::max(0.0f, total - view_h)));
-
-	for (size_t i = 0; i < rows.size(); i++)
-	{
-		const OptionsSheet::Row& r = rows[i];
-		const float ry = list_top + (offs[i] - m_sheet_scroll) * k;
-		const bool header = r.kind == OptionsSheet::Kind::Header;
-		const float rh = (header ? (r.label.empty() ? 30.0f : kHeaderH) : kRowH) * k;
-		if (ry < list_top - 2 * k || ry + rh > list_bottom + 2 * k)
-			continue; // outside the list's window
-		if (header)
-		{
-			if (!r.label.empty())
-			{
-				std::string upper = r.label;
-				for (char& c : upper)
-					c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
-				m_fonts->AddText(ui, upper.c_str(), cx, ry + 54 * k, 26 * k, lo, 0.45f);
-			}
-			continue;
-		}
-		const bool focused = static_cast<int>(i) == m_sheet_row;
-		const float bx = x + 32 * k, bw = sw - 64 * k, bh = rh - 10 * k;
-		if (focused)
-		{
-			Fonts::AddRoundedRect(ui, bx, ry, bw, bh, 26 * k, Rgba(1, 1, 1, 0.11f));
-			Fonts::AddRoundedRect(ui, bx + 14 * k, ry + 24 * k, 6 * k, bh - 48 * k, 3 * k, accent);
-		}
-		const float mid_y = ry + bh * 0.5f + 13 * k; // the text's baseline, centred in the row
-		const float lpx = 40 * k, vpx = 38 * k; // 2026-10-05: 38 and 36 before
-		const bool action = r.kind == OptionsSheet::Kind::Recommended || r.kind == OptionsSheet::Kind::ResetAll ||
-		                    r.kind == OptionsSheet::Kind::SystemMenu; // 2026-10-08
-
-		std::string value = m_sheet.Value(r);
-		const bool armed = m_sheet.Armed(r, m_time);
-		if (armed)
-			value = "Press again";
-		else if (action && r.kind == OptionsSheet::Kind::ResetAll)
-			value.clear();
-		if (r.kind == OptionsSheet::Kind::NewCard && focused)
-			value += "  \xC2\xB7  Create";
-		if (r.kind == OptionsSheet::Kind::OnlinePatches) // 2026-10-08
-			value = OnlinePatchValue();
-		const bool tile_row = r.kind == OptionsSheet::Kind::HomeTile; // 2.12: the helper's word for the game's tile (Off, Adding..., On, ...)
-		if (tile_row)
-			value = HomeTileValue();
-		const bool update_row = r.kind == OptionsSheet::Kind::SystemUpdate; // 180: no arrows (Cross looks and installs)
-		if (update_row || r.kind == OptionsSheet::Kind::LogUpload)
-			value = UpdateRowValue(r);
-		if (r.kind == OptionsSheet::Kind::ReloadTile && m_cfg.reload_tile_on) // b185
-			value = Tr(m_cfg.reload_tile_on() ? Str::ReloadTileOn : Str::ReloadTileOff);
-		// 2026-10-05: the HD texture pack row shows the pack, the download's progress or the installed pack.
-		const bool pack_row = r.kind == OptionsSheet::Kind::TexturePack && m_cfg.texture_packs && !m_games.empty();
-		TexturePackStatus pack;
-		bool pick_arrows = true;
-		if (pack_row)
-		{
-			const std::string& serial = m_games[static_cast<size_t>(m_selected)].serial;
-			pack = m_cfg.texture_packs.status(serial);
-			const auto it = m_texpack_pick.find(serial);
-			const int pick = it != m_texpack_pick.end() ? it->second : std::max(0, pack.job_pack);
-			value = TexturePackValue(pack, pick);
-			using TS = TexturePackStatus::State;
-			pick_arrows = pack.packs.size() > 1 && (pack.state == TS::Available || pack.state == TS::Failed || pack.state == TS::NeedSpace);
-			if (m_texpack_armed == serial && m_time <= m_texpack_armed_until)
-				value = "Press again";
-		}
-		// vk-285-135: the Folders rows open a list (Cross); left and right don't change them.
-		const bool folder_row = r.kind == OptionsSheet::Kind::GameFolders || r.kind == OptionsSheet::Kind::BiosFolder ||
-		                        r.kind == OptionsSheet::Kind::TexturesFolder || r.kind == OptionsSheet::Kind::NfsShares;
-		if (folder_row && focused)
-			value += "  \xE2\x80\xBA";
-		const bool arrows = focused && !action && pick_arrows && !folder_row && !tile_row && !update_row;
-
-		const float value_room = bw * (pack_row ? 0.68f : 0.46f); // 2026-10-05: the pack row's label is short, its value long
-		// vk-285-116: a label or a value that starts with a button's symbol ("<glyph>  Cross", the Controls tab): the symbol
-		// a size up, the label's in a slot of its own so the names line up.
-		std::string lglyph, lname, vglyph, vname;
-		const bool lsym = SplitSymbol(r.label, lglyph, lname), vsym = SplitSymbol(value, vglyph, vname);
-		const float slot = lsym ? 66 * k : 0.0f;
-		const std::string label = Fit(*m_fonts, lsym ? lname : r.label, lpx,
-			bw - 80 * k - slot - (value.empty() ? 0.0f : std::min(value_room, m_fonts->Measure(value.c_str(), vpx)) + 90 * k));
-		const uint32_t lc = action ? (focused ? hi : mid) : hi;
-		if (lsym && lglyph != icon::Blank)
-			m_fonts->AddText(ui, lglyph.c_str(), bx + 48 * k + slot * 0.42f, mid_y + kSymbolDrop * lpx, lpx * kSymbolScale, lc, 0.25f,
-				Fonts::Center);
-		m_fonts->AddText(ui, label.c_str(), bx + 48 * k + slot, mid_y, lpx, lc, 0.25f);
-
-		if (!value.empty())
-		{
-			const std::string shown = Fit(*m_fonts, vsym ? vname : value, vpx, value_room - (vsym ? 64 * k : 0.0f));
-			const OptionsSheet::From from = m_sheet.Source(r);
-			uint32_t vc = from == OptionsSheet::From::Own ? own : mid;
-			if (armed || (action && focused))
-				vc = own;
-			if (pack_row)
-			{
-				using TS = TexturePackStatus::State;
-				vc = pack.state == TS::Installed ? own : (pack.state == TS::Failed || pack.state == TS::NeedSpace) ? Rgba(1.0f, 0.62f, 0.60f) : mid;
-			}
-			if (tile_row) // 2.12: On in the shelf's own colour; a failure, a request nobody answered or a helper that is not there in the warning colour
-			{
-				using TP = gametile::Phase;
-				const TP p = m_tile_view.phase;
-				vc = p == TP::On ? own : (p == TP::Failed || p == TP::NoAnswer || p == TP::Stuck || p == TP::NoHelper) ? Rgba(1.0f, 0.62f, 0.60f) : mid;
-			}
-			const float vx = bx + bw - 44 * k - (arrows ? 30 * k : 0.0f);
-			float vw = m_fonts->AddText(ui, shown.c_str(), vx, mid_y, vpx, vc, 0.5f, Fonts::Right);
-			if (vsym && vglyph != icon::Blank)
-				vw += 14 * k + m_fonts->AddText(ui, vglyph.c_str(), vx - vw - 14 * k, mid_y + kSymbolDrop * vpx, vpx * kSymbolScale, vc, 0.5f,
-								   Fonts::Right);
-			if (arrows)
-			{
-				// The arrows either side of a value that left and right change.
-				m_fonts->AddText(ui, "\xE2\x80\xB9", vx - vw - 26 * k, mid_y + 1 * k, 44 * k, hi, 0.4f, Fonts::Center);
-				m_fonts->AddText(ui, "\xE2\x80\xBA", vx + 26 * k, mid_y + 1 * k, 44 * k, hi, 0.4f, Fonts::Center);
-			}
-			// A dot beside a value this file sets itself (not what it follows).
-			if (from == OptionsSheet::From::Own && !action && !focused)
-				Fonts::AddRoundedRect(ui, vx - vw - 30 * k, mid_y - 18 * k, 12 * k, 12 * k, 6 * k, own);
-		}
-		// 2026-10-05: a pack on its way: a thin bar along the row's foot.
-		if (pack_row && pack.total > 0)
-		{
-			using TS = TexturePackStatus::State;
-			if (pack.state == TS::Checking || pack.state == TS::Downloading || pack.state == TS::Unpacking)
-			{
-				const float fx = bx + 48 * k, fw = bw - 92 * k, fy = ry + bh - 16 * k;
-				const float f = std::clamp(static_cast<float>(pack.done) / static_cast<float>(pack.total), 0.0f, 1.0f);
-				Fonts::AddRoundedRect(ui, fx, fy, fw, 5 * k, 2.5f * k, Rgba(1, 1, 1, 0.10f));
-				if (f > 0)
-					Fonts::AddRoundedRect(ui, fx, fy, std::max(5 * k, fw * f), 5 * k, 2.5f * k, accent);
-			}
-		}
-	}
-	// A hint that there is more above or below.
-	if (m_sheet_scroll > 4.0f)
-		m_fonts->AddText(ui, "\xE2\x80\xA2 \xE2\x80\xA2 \xE2\x80\xA2", x + sw * 0.5f, list_top - 10 * k, 22 * k, lo, 0.3f, Fonts::Center);
-	if (m_sheet_scroll + view_h < total - 4.0f)
-		m_fonts->AddText(ui, "\xE2\x80\xA2 \xE2\x80\xA2 \xE2\x80\xA2", x + sw * 0.5f, list_bottom + 22 * k, 22 * k, lo, 0.3f, Fonts::Center);
-
-	// What the focused row does, and what the last change did.
-	Fonts::AddRoundedRect(ui, cx, list_bottom + 44 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
-	if (m_sheet_row >= 0 && m_sheet_row < static_cast<int>(rows.size()))
-	{
-		const OptionsSheet::Row& focus_row = rows[static_cast<size_t>(m_sheet_row)];
-		std::string help = m_sheet.Help(focus_row);
-		if (focus_row.kind == OptionsSheet::Kind::TexturePack && m_cfg.texture_packs && !m_games.empty())
-		{
-			const std::string& serial = m_games[static_cast<size_t>(m_selected)].serial;
-			const TexturePackStatus pack = m_cfg.texture_packs.status(serial);
-			const auto it = m_texpack_pick.find(serial);
-			help = TexturePackHelp(pack, it != m_texpack_pick.end() ? it->second : std::max(0, pack.job_pack), serial);
-		}
-		if (focus_row.kind == OptionsSheet::Kind::HomeTile) // 2.12
-			help = HomeTileHelp();
-		if (focus_row.kind == OptionsSheet::Kind::SystemUpdate || focus_row.kind == OptionsSheet::Kind::LogUpload) // 180
-			help = UpdateRowHelp(focus_row);
-		if (focus_row.kind == OptionsSheet::Kind::ReloadTile) // b185
-			help = Tr(Str::ReloadTileHelp);
-		float hy = list_bottom + 110 * k;
-		for (const std::string& line : Wrap(*m_fonts, help, 32 * k, inner, 4))
-		{
-			m_fonts->AddText(ui, line.c_str(), cx, hy, 32 * k, mid, 0.1f);
-			hy += 46 * k;
-		}
-	}
-	if (!m_sheet_status.empty() && m_time - m_sheet_status_time < 3.0)
-	{
-		const float a = 1.0f - Smoothstep(2.2f, 3.0f, static_cast<float>(m_time - m_sheet_status_time));
-		const uint32_t c = (own & 0x00FFFFFFu) | (static_cast<uint32_t>(a * 255.0f) << 24);
-		m_fonts->AddText(ui, Fit(*m_fonts, m_sheet_status, 30 * k, inner).c_str(), cx, y + sh - 40 * k, 30 * k, c, 0.4f);
-	}
-
-	FadeRange(ui, begin, ui.size(), Clamp(e * 1.4f, 0.0f, 1.0f));
-}
 // ---- vk-285-135: the sheet's folder picker and NFS share list (AI-assisted) ------------------------------------------
 // swordpdf: "also where is the option to select what dir is set for games and bios?", "i also want to pick a folder though the
 // browser in the shelf". The sheet for all games' Folders rows open it in the sheet's place: the places first (the folders
@@ -4308,6 +3850,8 @@ void App::PollDiscAsk()
 		return;
 	std::string title, serial;
 	const bool pending = m_cfg.disc_ask_poll(title, serial);
+	if (pending && !m_ask_on && S3Active() && m_time > m_s3.ask_allowed_until) // shelf v3 (AI-assisted): only after X on the Browser's disc
+		return;
 	if (pending && !m_ask_on && !m_launching && !m_bios_ask)
 	{
 		m_ask_on = true;
@@ -4315,7 +3859,7 @@ void App::PollDiscAsk()
 		m_ask_serial = serial;
 		m_ask_sel = 0;
 		m_held = 0;
-		Sound(Sfx::Move, 0.0f);
+		Sound(Sfx::Disc, 0.0f); // ps2-console-shelf: disc.wav
 		std::printf("[frontend] disc ask: %s (%s)\n", title.c_str(), serial.c_str());
 		std::fflush(stdout);
 	}
@@ -4325,7 +3869,8 @@ void App::PollDiscAsk()
 
 void App::UpdateDiscAsk(const Input& in)
 {
-	const bool left = in.left && !m_prev.left, right = in.right && !m_prev.right;
+	// ps2-console-shelf: the two answers are a list on the disc's screen: up and down choose too.
+	const bool left = (in.left && !m_prev.left) || (in.up && !m_prev.up), right = (in.right && !m_prev.right) || (in.down && !m_prev.down);
 	int answer = 0;
 	if (left || right)
 	{
@@ -4343,78 +3888,11 @@ void App::UpdateDiscAsk(const Input& in)
 		if (m_cfg.disc_ask_answer)
 			m_cfg.disc_ask_answer(answer);
 		m_ask_on = false;
-		Sound(answer == 3 ? Sfx::Edge : Sfx::Launch, 0.0f);
+		m_s3.ask_allowed_until = -1; // shelf v3: answered; the next question waits for the next X on the disc
+		if (answer == 2 && S3Active())
+			m_s3.spin_t0 = m_time; // shelf v3: the page stays, the disc spins faster and faster, then the game (kurolume, 2026-11-16)
+		Sound(answer == 3 ? Sfx::Back : Sfx::Select, 0.0f);
 	}
-}
-
-void App::BuildDiscAsk(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent)
-{
-	const float e = Smoothstep(0.0f, 1.0f, m_ask_anim);
-	const size_t begin = ui.size();
-	const uint32_t hi = Rgba(1, 1, 1), mid = Rgba(0.76f, 0.74f, 0.86f), lo = Rgba(0.56f, 0.54f, 0.68f);
-	const uint32_t ink = Rgba(0.07f, 0.06f, 0.16f), inkmid = Rgba(0.30f, 0.28f, 0.44f);
-	// The shelf behind, dimmed so that the panel is what the eye goes to.
-	Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.76f));
-
-	const float pw = 1560 * k, ph = 740 * k, px = (W - pw) * 0.5f, py = (H - ph) * 0.5f - 20 * k;
-	const float pad = 84 * k, cx = px + pad, inner = pw - 2 * pad;
-	// The panel: a soft shadow, a faint rim, the dark body, and a thin accent line along its top.
-	Fonts::AddRoundedRect(ui, px - 8 * k, py + 14 * k, pw + 16 * k, ph + 16 * k, 52 * k, Rgba(0, 0, 0, 0.38f));
-	Fonts::AddRoundedRect(ui, px - 2 * k, py - 2 * k, pw + 4 * k, ph + 4 * k, 46 * k, Rgba(1, 1, 1, 0.14f));
-	Fonts::AddRoundedRect(ui, px, py, pw, ph, 44 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f));
-	Fonts::AddRoundedRect(ui, px + 120 * k, py, pw - 240 * k, 6 * k, 3 * k, accent);
-
-	// The disc: a bright rim, a darker face with a ring in the accent colour, and the hole.
-	const float dr = 62 * k, dcx = cx + dr, dcy = py + 148 * k;
-	Fonts::AddRoundedRect(ui, dcx - dr - 6 * k, dcy - dr - 6 * k, 2 * (dr + 6 * k), 2 * (dr + 6 * k), dr + 6 * k, Rgba(1, 1, 1, 0.10f));
-	Fonts::AddRoundedRect(ui, dcx - dr, dcy - dr, 2 * dr, 2 * dr, dr, Rgba(0.80f, 0.80f, 0.92f, 0.95f));
-	Fonts::AddRoundedRect(ui, dcx - dr * 0.80f, dcy - dr * 0.80f, 2 * dr * 0.80f, 2 * dr * 0.80f, dr * 0.80f, Rgba(0.10f, 0.10f, 0.22f, 1.0f));
-	Fonts::AddRoundedRect(ui, dcx - dr * 0.50f, dcy - dr * 0.50f, 2 * dr * 0.50f, 2 * dr * 0.50f, dr * 0.50f, accent);
-	Fonts::AddRoundedRect(ui, dcx - dr * 0.44f, dcy - dr * 0.44f, 2 * dr * 0.44f, 2 * dr * 0.44f, dr * 0.44f, Rgba(0.10f, 0.10f, 0.22f, 1.0f));
-	Fonts::AddRoundedRect(ui, dcx - dr * 0.17f, dcy - dr * 0.17f, 2 * dr * 0.17f, 2 * dr * 0.17f, dr * 0.17f, Rgba(0.80f, 0.80f, 0.92f, 0.95f));
-
-	// What is in the drive: a small label, the game's name, its serial.
-	const float tx = cx + 2 * dr + 56 * k, tw = inner - 2 * dr - 56 * k;
-	m_fonts->AddText(ui, "PS2 DISC IN THE DRIVE", tx, py + 96 * k, 26 * k, mid, 0.40f);
-	m_fonts->AddText(ui, Fit(*m_fonts, m_ask_title, 64 * k, tw).c_str(), tx, py + 168 * k, 64 * k, hi, 0.55f);
-	if (!m_ask_serial.empty())
-		m_fonts->AddText(ui, m_ask_serial.c_str(), tx, py + 214 * k, 28 * k, lo, 0.20f);
-
-	Fonts::AddRoundedRect(ui, cx, py + 262 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.10f));
-	m_fonts->AddText(ui, "How do you want to play it?", cx, py + 322 * k, 34 * k, mid, 0.25f);
-
-	// Two cards, side by side: the focused one is white with dark text and a glow in the accent colour.
-	const float gap = 36 * k, cw = (inner - gap) * 0.5f, ch = 220 * k, cy = py + 360 * k;
-	auto card = [&](float x0, const char* title, const char* line1, const char* line2, bool focused) {
-		if (focused)
-		{
-			Fonts::AddRoundedRect(ui, x0 - 8 * k, cy - 8 * k, cw + 16 * k, ch + 16 * k, 46 * k, Rgba(1, 1, 1, 0.16f));
-			Fonts::AddRoundedRect(ui, x0 - 4 * k, cy - 4 * k, cw + 8 * k, ch + 8 * k, 42 * k, accent);
-			Fonts::AddRoundedRect(ui, x0, cy, cw, ch, 38 * k, Rgba(1, 1, 1, 0.96f));
-		}
-		else
-			Fonts::AddRoundedRect(ui, x0, cy, cw, ch, 38 * k, Rgba(1, 1, 1, 0.07f));
-		const uint32_t t = focused ? ink : hi, c = focused ? inkmid : mid;
-		m_fonts->AddText(ui, title, x0 + cw * 0.5f, cy + 84 * k, 46 * k, t, 0.55f, Fonts::Center);
-		m_fonts->AddText(ui, line1, x0 + cw * 0.5f, cy + 140 * k, 29 * k, c, 0.15f, Fonts::Center);
-		m_fonts->AddText(ui, line2, x0 + cw * 0.5f, cy + 182 * k, 29 * k, c, 0.15f, Fonts::Center);
-	};
-	card(cx, "Play from disc", "Starts right now.", "The disc stays in the drive.", m_ask_sel == 0);
-	card(cx + cw + gap, "Copy to storage", "A few minutes, then it plays.", "After that the disc can come out.", m_ask_sel == 1);
-
-	// The buttons, in small chips along the bottom.
-	float hx = cx;
-	auto hint = [&](const char* key, const char* what) {
-		const float kpx = 24 * k, kw = m_fonts->Measure(key, kpx) + 36 * k, kh = 46 * k, hy = py + ph - 100 * k;
-		Fonts::AddRoundedRect(ui, hx, hy, kw, kh, kh * 0.5f, Rgba(1, 1, 1, 0.14f));
-		m_fonts->AddText(ui, key, hx + kw * 0.5f, hy + kh * 0.5f + 9 * k, kpx, hi, 0.45f, Fonts::Center);
-		hx += kw + 14 * k;
-		hx += m_fonts->AddText(ui, what, hx, hy + kh * 0.5f + 9 * k, kpx, lo, 0.20f) + 40 * k;
-	};
-	hint("Left / Right", "choose");
-	hint("Cross", "confirm");
-	hint("Circle", "not now");
-	FadeRange(ui, begin, ui.size(), e);
 }
 
 void App::BuildAccount(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent)
@@ -4729,6 +4207,8 @@ bool App::SearchMatches(const GameInfo& g) const
 	const std::string& q = m_search.applied;
 	if (q.empty())
 		return true;
+	if (S3Active()) // shelf v3 (AI-assisted): words match word starts
+		return S3SearchMatches(g);
 	std::string plain;
 	for (const char c : g.serial)
 		if (c != '-')
@@ -4759,8 +4239,37 @@ void App::SetSearch(const std::string& text)
 		const int keep = m_games.empty() ? m_search_return : m_index[static_cast<size_t>(m_selected)];
 		if (!m_games.empty() && m_index[static_cast<size_t>(m_selected)] >= 0)
 			m_search_return = m_index[static_cast<size_t>(m_selected)];
+		// P2-22 (kurolume: "when we search, it should show all the searches" and "if we delete everything, it should put us back where we
+		// were"): a search starting remembers the Library's game and top row; new results start at their top on the first match; the
+		// search cleared (deleted or cancelled) brings back that game and row.
+		const bool starting = m_search.applied.empty();
+		if (starting)
+		{
+			m_search_before = keep;
+			m_search_before_top = m_grid_target;
+		}
 		m_search.applied = applied;
-		ApplyHidden(keep);
+		if (applied.empty() && !starting)
+		{
+			ApplyHidden(m_search_before);
+			m_grid_target = m_search_before_top;
+		}
+		else
+		{
+			ApplyHidden(keep);
+			int first = 0;
+			while (first < static_cast<int>(m_index.size()) && m_index[static_cast<size_t>(first)] < 0)
+				first++; // past the disc entries: the first game that matches
+			if (first < static_cast<int>(m_index.size()) && first != m_selected)
+			{
+				m_selected = first;
+				m_scroll = static_cast<float>(m_selected);
+				m_scroll_vel = 0;
+				if (m_covers)
+					m_covers->SetSelected(m_index[static_cast<size_t>(m_selected)]);
+			}
+			m_grid_target = 0;
+		}
 		m_flip_latched = false;
 		m_select_time = m_time;
 		std::printf("[frontend] search \"%s\": %zu of %zu games\n", clean.c_str(), m_games.size(), m_games.size() + m_shelved.size());
@@ -4989,7 +4498,16 @@ void App::BuildSearch(std::vector<UiVertex>& ui, float W, float H, float k, uint
 		const float y = rest + (1.0f - ke) * (h + 240.0f * k);
 		const size_t begin = ui.size();
 		BuildPanelKeyboard(ui, x, y, w, ks, "Search", s.page, s.row, s.col);
+		m_search.kb_x = x;
+		m_search.kb_y = y;
+		m_search.kb_w = w;
+		m_search.kb_h = h;
 		FadeRange(ui, begin, ui.size(), Clamp(ke * 1.5f, 0.0f, 1.0f));
 	}
 }
 } // namespace fe
+
+// ps2-console-shelf (AI-assisted): the PS2 screens, in this file's unit (they use its helpers).
+#include "fe_ps2ui_impl.h"
+#include "shelf3/s3_app.inc"  // shelf v3 (AI-assisted)
+#include "shelf3/s3_app2.inc" // shelf v3

@@ -236,10 +236,10 @@ std::vector<OptionDef> ButtonsGroup()
 	constexpr const char* fast_hint = "Experimental, for skipping videos: hold both fast forward buttons together (for the hold time above) to run the game as fast as it goes, and again to go back to full speed. Nothing on both: no fast forward button. Sound may skip while it's on.";
 	constexpr const char* disc_hint = "Hold both change disc buttons together to put in the game's next disc: images named \"(Disc 1)\", \"(Disc 2)\"... in the same folder, or listed in an .m3u file, are one game's discs. Any image (a GameShark disc's game, say) goes in from the settings page's Disc section while you play. Nothing on both: no change disc button.";
 	std::vector<OptionDef> out = {
-		Seg("PS5SX2/SaveButton1", "Save: button 1", "L3R3", "", ComboChoices(), save_hint),
-		Seg("PS5SX2/SaveButton2", "Save: button 2", "Up", "", ComboChoices(), save_hint),
-		Seg("PS5SX2/LoadButton1", "Load: button 1", "L3R3", "", ComboChoices(), load_hint),
-		Seg("PS5SX2/LoadButton2", "Load: button 2", "Down", "", ComboChoices(), load_hint),
+		Seg("PS5SX2/SaveButton1", "Save: button 1", "None", "", ComboChoices(), save_hint),
+		Seg("PS5SX2/SaveButton2", "Save: button 2", "None", "", ComboChoices(), save_hint),
+		Seg("PS5SX2/LoadButton1", "Load: button 1", "None", "", ComboChoices(), load_hint),
+		Seg("PS5SX2/LoadButton2", "Load: button 2", "None", "", ComboChoices(), load_hint),
 		Seg("PS5SX2/StateHold", "Hold time", "0", "", {{"0", "Instant"}, {"0.5", "0.5 s"}, {"1", "1 s"}, {"1.5", "1.5 s"}, {"2", "2 s"}, {"3", "3 s"}},
 			"How long the save or load buttons are held before it happens. Instant: as soon as both are down, and that last press doesn't "
 			"reach the game. A second or two stops saving or loading by accident."),
@@ -248,13 +248,13 @@ std::vector<OptionDef> ButtonsGroup()
 		Seg("PS5SX2/FastButton2", "Fast forward: button 2", "None", "", ComboChoices(), fast_hint),
 		Seg("PS5SX2/FastSpeed", "Fast forward speed", "0", "", {{"0", "Max"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}}, "How fast fast forward runs. Max: as fast as the console can. Some games' videos skip only at Max."),
 		// vk-285-139: change disc, for games on more than one disc.
-		Seg("PS5SX2/DiscButton1", "Change disc: button 1", "L3R3", "", ComboChoices(), disc_hint),
-		Seg("PS5SX2/DiscButton2", "Change disc: button 2", "Right", "", ComboChoices(), disc_hint),
+		Seg("PS5SX2/DiscButton1", "Change disc: button 1", "None", "", ComboChoices(), disc_hint),
+		Seg("PS5SX2/DiscButton2", "Change disc: button 2", "None", "", ComboChoices(), disc_hint),
 		// 2.31 (AI-assisted): the in-game menu (fe_ingame.h); the keys stay WebButton1/2, so a combo set before still opens it.
-		Seg("PS5SX2/WebButton1", "In-game menu: button 1", "L2", "", ComboChoices(),
-			"Opens the in-game menu (held for a second; the game pauses): save and load states, the settings, the controls and more. Default: L2 + D-pad down."),
-		Seg("PS5SX2/WebButton2", "In-game menu: button 2", "Down", "", ComboChoices(),
-			"Opens the in-game menu (held for a second; the game pauses): save and load states, the settings, the controls and more. Default: L2 + D-pad down."),
+		Seg("PS5SX2/WebButton1", "In-game menu: button 1", "L3R3", "", ComboChoices(),
+			"Opens the in-game menu (held for a second; the game pauses): save and load states, the settings, the controls and more. Default: both sticks (L3 + R3)."),
+		Seg("PS5SX2/WebButton2", "In-game menu: button 2", "L3R3", "", ComboChoices(),
+			"Opens the in-game menu (held for a second; the game pauses): save and load states, the settings, the controls and more. Default: both sticks (L3 + R3)."),
 	};
 	for (OptionDef& d : ButtonRows())
 		out.push_back(std::move(d));
@@ -367,8 +367,24 @@ const std::vector<OptionGroup>& OptionGroups()
 			kTabSettings, true},
 		{"Shelf",
 			{
+				// shelf v3 (AI-assisted): the Library's layout, the disc slot and the screen's shape (shelf3/s3_app.inc reads them).
+				Seg("PS5SX2/ShelfLayout", "Library Layout", "grid", "", {{"grid", "Grid 6x3"}, {"large", "Large 4x2"}},
+					"How many games the Library shows at once: Grid 6x3, or Large 4x2 with bigger cases (with Screen Shape 4:3: 5x3 or 3x2). "
+					"Takes effect when the Library opens next."),
+				Seg("PS5SX2/CaseColour", "Case Colour", "black", "", {{"black", "Black"}, {"blue", "Blue"}},
+					"The colour of the game cases' plastic: Black, or the Blue many PAL games came in."),
+				Seg("PS5SX2/DiscSlot", "Disc Slot", "auto", "", {{"auto", "Only when a disc is in"}, {"always", "Always show"}},
+					"Only when a disc is in: the Browser shows the disc when one is in the drive, as the PS2 does. Always show: an empty slot "
+					"stays, with Check for Disc."),
+				Seg("PS5SX2/ShelfShape", "Screen Shape", "16:9", "", {{"16:9", "16:9"}, {"4:3", "4:3"}},
+					"16:9 fills the TV. 4:3 is the PS2's own frame with dark sides."),
 				Toggle("PS5SX2/ShowHiddenGames", "Show hidden games", "false", "Hidden games %",
 					"Puts the games hidden from the shelf back on it, dimmed, so you can open one's sheet and turn Hide from the shelf off."),
+				// P2-24 (AI-assisted): the PS2's own startup, played from your BIOS when PS5SX2 starts (main-boot.cpp).
+				// shelf v3: shown as Fast Boot (Opening): On skips the opening (StartupAnimation false).
+				Seg("PS5SX2/StartupAnimation", "Fast Boot (Opening)", "true", "", {{"false", "On"}, {"true", "Off"}},
+					"Off: when PS5SX2 starts, your PS2 BIOS plays its own opening (the towers rise from your play time), then the main menu fades in. "
+					"Any button skips it. On: straight to the main menu. Needs a BIOS of your own (not OpenPS2BIOS)."),
 			},
 			kTabSettings, false, true},
 		// vk-285-139 (AI-assisted; swordpdf: a GameShark disc for all games, "it would have to be disc 1 at all times"): games
@@ -448,7 +464,10 @@ const std::vector<OptionGroup>& OptionGroups()
 					"or the disc image's. Only for homebrew that asks for it.",
 					true),
 				// 2026-10-08 (AI-assisted; testers asked for the full boot): PCSX2's fast boot (EmuCore/EnableFastBoot).
-				Toggle("EmuCore/EnableFastBoot", "Fast boot", "true", "Fast boot %",
+				// shelf v3 (AI-assisted): a state saved when you leave the game (L1 + R1 + Touch): the game page's Auto (main-boot.cpp).
+				Toggle("PS5SX2/AutoSave", "Auto Save", "false", "Auto save %",
+					"Saves a state when you quit the game (L1 + R1 + Touch); the game page's Play offers it first, as Auto."),
+				Toggle("EmuCore/EnableFastBoot", "Fast Boot", "true", "Fast boot %",
 					"Off: the PS2's own start-up first, the towers and the PlayStation 2 logo, as on a PS2 (a few games want it). On "
 					"goes straight to the game.",
 					true),
@@ -473,6 +492,19 @@ const std::vector<OptionGroup>& OptionGroups()
 		// the file sets the same value (GameDatabase.cpp applyGSHardwareFixes), so turning them on here writes those first
 		// (settings::ManualFixSettings). They take effect in a running game (GSRendererHW::UpdateSettings). Needs proper
 		// testing on the console.
+		// shelf v3 (AI-assisted): PCSX2's own audio output settings (SPU2/Output), the settings' Audio tab. Read when a game starts.
+		{"Audio",
+			{
+				Seg("SPU2/Output/StandardVolume", "Volume", "100", "Volume %",
+					{{"0", "0%"}, {"10", "10%"}, {"20", "20%"}, {"30", "30%"}, {"40", "40%"}, {"50", "50%"}, {"60", "60%"}, {"70", "70%"},
+						{"80", "80%"}, {"90", "90%"}, {"100", "100%"}},
+					"The game's sound level.", true),
+				Seg("SPU2/Output/FastForwardVolume", "Fast forward volume", "100", "",
+					{{"0", "0%"}, {"25", "25%"}, {"50", "50%"}, {"75", "75%"}, {"100", "100%"}}, "The sound level while fast forward runs.", true),
+				Toggle("SPU2/Output/OutputMuted", "Mute", "false", "", "No sound from the game.", true),
+				Seg("SPU2/Output/SyncMode", "Audio sync", "TimeStretch", "", {{"TimeStretch", "TimeStretch"}, {"Disabled", "Off"}},
+					"TimeStretch keeps the sound smooth when the game runs below full speed. Off can crackle.", true),
+			}},
 		{"Hardware fixes", HardwareFixesGroup(), kTabSettings, true},
 		// vk-285-115: PCSX2's crop (EmuCore/GS/CropLeft..CropBottom, PS2 pixels), as on the page. 2026-10-08: the last group of the
 		// Settings tab, as testers asked (it is set once for a game and then left).
@@ -693,6 +725,12 @@ void OptionsSheet::BuildRows()
 		add(Kind::Header, "Home screen");
 		add(Kind::ReloadTile, Tr(Str::ReloadTileRow));
 	}
+	// P2-16: the web settings page (its QR code full screen), moved here from Home.
+	if (settings && m_global && m_web_settings_row)
+	{
+		add(Kind::Header, "Network");
+		add(Kind::WebSettings, "Web Settings");
+	}
 	// 2026-10-08: the "Get patches and cheats" row heads the game's patches (shown with none yet), then its cheats.
 	const bool online = settings && m_online_patch_row && !m_global && !m_serial.empty();
 	if (settings && (!m_patches.empty() || online))
@@ -832,6 +870,7 @@ std::string OptionsSheet::Value(const Row& r) const
 		case Kind::SystemUpdate: // 180: the app's (fe_app.cpp, from fe_update.h)
 		case Kind::LogUpload:
 		case Kind::ReloadTile: // b185: the app's (fe_app.cpp)
+		case Kind::WebSettings: // P2-16: the app's (fe_app.cpp)
 			return {};
 	}
 	return {};
@@ -945,7 +984,8 @@ std::string OptionsSheet::Help(const Row& r) const
 				{
 					const std::string sz = CardSize(c.bytes);
 					const bool an = sz[0] == '8' || sz.rfind("11", 0) == 0 || sz.rfind("18", 0) == 0; // "an 8 MB card"
-					size = " " + c.name + " is " + (an ? "an " : "a ") + sz + " card.";
+					size = c.folder ? " " + c.name + " is a folder card: each game sees its own saves, so it doesn't fill up."
+					                : " " + c.name + " is " + (an ? "an " : "a ") + sz + " card.";
 				}
 			return "Which memory card is in slot " + std::to_string(r.slot) + "." + size + " " +
 			       (Source(r) == From::Own ? std::string("Set for ") + (m_global ? "all games." : "this game.") : "Follows " + follows + ".") +

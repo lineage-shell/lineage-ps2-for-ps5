@@ -579,8 +579,8 @@ void CoverService::PaintSpine(const Fonts& fonts, const GameInfo& g, CoverImage&
 		}
 	std::vector<uint8_t> a;
 	int tw, th, base;
-	// "PlayStation 2" at the top, the title, and the serial at the foot, all reading downwards.
-	fonts.Raster("PlayStation\xC2\xAE" "2", 25.0f, a, tw, th, base);
+	// "PS2" at the top (ps2-console-shelf: no wordmark painted), the title, and the serial at the foot, all reading downwards.
+	fonts.Raster("PS2", 25.0f, a, tw, th, base);
 	DrawAlpha(out, a, tw, th, (W - th) / 2, 40, 0xe8e8e8, true);
 	const int title_top = 60 + tw + 70, title_bottom = H - 190;
 	float px = 44.0f;
@@ -629,7 +629,7 @@ void CoverService::PaintPlaceholder(const Fonts& fonts, const GameInfo& g, Cover
 	}
 	std::vector<uint8_t> a;
 	int tw, th, base;
-	fonts.Raster("PlayStation\xC2\xAE" "2", 19.0f, a, tw, th, base);
+	fonts.Raster("PS2", 19.0f, a, tw, th, base);
 	DrawAlpha(out, a, tw, th, 12, 18 - base + 6, 0xffffff, false);
 	const std::vector<std::string> lines = Wrap(fonts, g.title, 38.0f, W - 44.0f, 5);
 	const float line_h = 46.0f;
@@ -1225,6 +1225,14 @@ void CoverService::Run()
 				std::lock_guard<std::mutex> lock(m_mutex);
 				m_disc_dl = true; // the download thread fetches it
 			}
+			else if (FindLocalFront(disc_serial, art)) // P2-17: no disc art to be had: the game's front, printed on a silver disc
+			{
+				art.kind = CoverImage::Disc;
+				art.game = -1;
+				art.serial = disc_serial;
+				art.front = true;
+				PushDisc(art);
+			}
 			continue;
 		}
 		if (back >= 0)
@@ -1417,7 +1425,7 @@ void CoverService::PaintBackPlaceholder(const Fonts& fonts, const GameInfo& g, C
 	}
 	std::vector<uint8_t> a;
 	int tw, th, base;
-	fonts.Raster("PlayStation\xC2\xAE" "2", 14.0f, a, tw, th, base);
+	fonts.Raster("PS2", 14.0f, a, tw, th, base);
 	DrawAlpha(out, a, tw, th, 9, 13 - base + 4, 0xffffff, false);
 	const std::vector<std::string> lines = Wrap(fonts, g.title, 25.0f, W - 36.0f, 4);
 	const float line_h = 31.0f;
@@ -1709,6 +1717,25 @@ bool CoverService::PushDisc(CoverImage& img)
 		return false;
 	m_results.push_back(std::move(img));
 	return true;
+}
+
+// P2-17: a disc with no disc art: the game's front (the player's covers/<serial>.jpg|png, or the one downloaded for the shelf), which the
+// shelf prints as the label of a silver disc.
+bool CoverService::FindLocalFront(const std::string& serial, CoverImage& out)
+{
+	std::vector<uint8_t> bytes;
+	for (const std::string& dir : {m_cfg.manual_dir, m_cfg.cache_dir})
+		for (const char* ext : {".jpg", ".png", ".jpeg"})
+		{
+			if (dir.empty() || serial.empty())
+				continue;
+			if (ReadFile(dir + "/" + serial + ext, bytes) && Decode(bytes, 512, out))
+			{
+				out.source = dir == m_cfg.manual_dir ? "manual front" : "cache front";
+				return true;
+			}
+		}
+	return false;
 }
 
 // The player's own disc art (covers/<serial>_disc.png) or one downloaded before (cache/<serial>_disc.png).
@@ -2042,7 +2069,8 @@ bool CoverService::ServeRequest()
 	if (!disc.empty())
 	{
 		CoverImage art;
-		if (DownloadDisc(disc, art))
+		const bool got = DownloadDisc(disc, art) || (art.front = FindLocalFront(disc, art)); // P2-17: else the front, as the label
+		if (got)
 		{
 			art.kind = CoverImage::Disc;
 			art.game = -1;

@@ -57,6 +57,23 @@ bool g_orbis_instant_dma_loop = false;
 
 u32 g_eeloadMain = 0, g_eeloadExec = 0, g_osdsys_str = 0;
 
+// PS5 port (2026-11-16, AI-assisted): the PS2 logo before a fast-booted PS2 disc (R5900.h). On a real PS2, OSDSYS reads
+// SYSTEM.CNF's BOOT2 and calls LoadExecPS2("rom0:PS2LOGO", [BOOT2]); PS2LOGO shows the logo stored on the disc, then execs the
+// game. Fast boot skips OSDSYS, so here EELOAD's own first call is turned into that launch: "rom0:OSDSYS" in EELOAD is replaced by
+// "rom0:PS2LOGO" and eeloadHook2() gives it the arguments {"rom0:PS2LOGO", BOOT2, <launch args>}. PS2LOGO's own LoadExecPS2 of the
+// game then comes back through eeloadHook() as in a full boot. Whenever the logo can't be trusted to work (see
+// Ps2LogoBootPath()) or PS2LOGO hands back to OSDSYS instead of the game, the game is started directly as before.
+bool g_ps2logo_boot = false;
+enum class Ps2LogoState : u8
+{
+	Off,      // not used for this boot (or not yet decided)
+	Pending,  // EELOAD's default call was turned into rom0:PS2LOGO; eeloadHook2() still has to give it the arguments
+	Running,  // PS2LOGO was started with the game's path
+};
+static Ps2LogoState s_ps2logo_state = Ps2LogoState::Off;
+static bool s_ps2logo_tried = false; // once per boot: a second default EELOAD call (PS2LOGO gave up) starts the game directly
+static std::string s_ps2logo_game; // BOOT2, the path PS2LOGO is given
+
 /* I don't know how much space for args there is in the memory block used for args in full boot mode,
 but in fast boot mode, the block we use can fit at least 16 argv pointers (varies with BIOS version).
 The second EELOAD call during full boot has three built-in arguments ("EELOAD rom0:PS2LOGO <ELF>"),
@@ -98,6 +115,9 @@ void cpuReset()
 	g_eeloadMain = 0;
 	g_eeloadExec = 0;
 	g_osdsys_str = 0;
+	s_ps2logo_state = Ps2LogoState::Off;
+	s_ps2logo_tried = false;
+	s_ps2logo_game.clear();
 
 	CBreakPoints::ClearSkipFirst();
 }
@@ -679,6 +699,134 @@ int ParseArgumentString(u32 arg_block)
 	return argc;
 }
 
+// PS5 port (2026-11-16, AI-assisted): the BIOS image holds a file of this name (its ROMDIR, as BiosTools.cpp reads it).
+// OpenPS2BIOS has no PS2LOGO, so it is never used with that BIOS.
+static bool BiosHasRomFile(const char* name)
+{
+	const size_t size = BiosRom.size();
+	size_t dir = size;
+	for (size_t i = 0; i + 16 <= size && i < 512 * 1024; i += 16)
+	{
+		if (std::memcmp(&BiosRom[i], "RESET\0", 6) == 0)
+		{
+			dir = i;
+			break;
+		}
+	}
+	for (size_t i = dir; i + 16 <= size; i += 16)
+	{
+		const char* entry = reinterpret_cast<const char*>(&BiosRom[i]);
+		if (entry[0] == '\0' || strnlen(entry, 10) == 10)
+			break;
+		if (std::strncmp(entry, name, 10) == 0)
+			return true;
+	}
+	return false;
+}
+
+// The address of EELOAD's call to ExecPS2(), as the recompilers find it (iR5900.cpp recRecompile); 0 for an EELOAD they don't know.
+static u32 EeloadExecAddress()
+{
+	const u32 typeAexecjump = memRead32(EELOAD_START + 0x470);
+	const u32 typeBexecjump = memRead32(EELOAD_START + 0x5B0);
+	const u32 typeCexecjump = memRead32(EELOAD_START + 0x618);
+	const u32 typeDexecjump = memRead32(EELOAD_START + 0x600);
+	if ((typeBexecjump >> 26 == 3) || (typeCexecjump >> 26 == 3) || (typeDexecjump >> 26 == 3))
+		return EELOAD_START + 0x2B8;
+	if (typeAexecjump >> 26 == 3)
+		return EELOAD_START + 0x170;
+	return 0;
+}
+
+// The BIOS region (BiosTools.cpp numbering) a disc serial's prefix asks for, as ps5/coreorbis/main-boot.cpp's BIOS-by-region
+// choice reads it; -1 unknown.
+static int Ps2LogoSerialRegion(const std::string& serial)
+{
+	if (serial.size() < 4)
+		return -1;
+	const std::string p = StringUtil::toUpper(serial.substr(0, 4));
+	if (p == "SLUS" || p == "SCUS" || p == "PBPX" || p == "LSP-" || p == "LSP_")
+		return 1;
+	if (p == "SLES" || p == "SCES" || p == "SCED" || p == "SLED")
+		return 2;
+	if (p == "SCAJ" || p == "SLAJ" || p == "SCKA" || p == "SLKA")
+		return 4;
+	if (p == "SLPM" || p == "SLPS" || p == "SCPS" || p == "SCPM")
+		return 0;
+	return -1;
+}
+
+// The game path to give PS2LOGO for this fast boot, or empty when the game should start directly. The logo is decoded by
+// PS2LOGO with the BIOS's region (a PAL disc on a USA BIOS comes out scrambled), it is read from the disc's first 12
+// sectors (a homebrew image or an HDD-loader rip often has none), and it can't be skipped or timed out from here, so it is
+// only used when all of this holds.
+static std::string Ps2LogoBootPath(const std::string& boot2, const std::string& serial)
+{
+	const char* why = nullptr;
+	if (!g_ps2logo_boot)
+		return {};
+	if (s_ps2logo_tried)
+		why = "PS2LOGO already ran once this boot without starting the game";
+	else if (!VMManager::Internal::GetELFOverride().empty())
+		why = "an ELF is being started";
+	else if (EmuConfig.EnableFastBootFastForward)
+		why = "fast boot fast-forward is on";
+	else if (!EmuConfig.CurrentGameArgs.empty() && EmuConfig.CurrentGameArgs.size() > 64)
+		why = "the launch arguments are too long";
+	else if (!StringUtil::StartsWithNoCase(boot2, "cdrom0:") || boot2.find(' ') != std::string::npos || boot2.size() > 64)
+		why = "SYSTEM.CNF's BOOT2 is not a plain cdrom0: path";
+	else if (!BiosHasRomFile("PS2LOGO"))
+		why = "the BIOS has no PS2LOGO";
+	else if (EeloadExecAddress() == 0)
+		why = "this BIOS's EELOAD is not one the launch hook knows";
+	else
+	{
+		int bios_region = static_cast<int>(BiosRegion);
+		if (bios_region == 3 || bios_region == 5) // Oceania, Russia: European discs
+			bios_region = 2;
+		else if (bios_region == 7) // Mexico: American discs
+			bios_region = 1;
+		const int disc_region = Ps2LogoSerialRegion(serial);
+		if (disc_region < 0)
+			why = "the disc's region is not known from its serial";
+		else if (disc_region != bios_region)
+			why = "the disc's region is not the BIOS's";
+		else
+		{
+			// The logo: sectors 0-11 of the disc. All zero = no logo to show.
+			bool any = false;
+			u8 sector[2048];
+			u8 first = 0;
+			for (u32 lsn = 0; lsn < 12 && !any; lsn++)
+			{
+				if (DoCDVDreadSector(sector, lsn, CDVD_MODE_2048) != 0)
+				{
+					why = "the disc's logo sectors can't be read";
+					break;
+				}
+				for (u8 b : sector)
+					any = any || (b != 0);
+				if (lsn == 0)
+					first = sector[0];
+			}
+			if (!why && any)
+			{
+				u8 key[16];
+				cdvdReadKey(0, 0, 75, key);
+				Console.WriteLn(fmt::format("PS2 logo: disc key byte {:02x}, logo's first byte {:02x}", key[4], first));
+			}
+			if (!why && !any)
+				why = "the disc has no logo (its first sectors are empty)";
+		}
+	}
+	if (why)
+	{
+		Console.WriteLn(Color_StrongOrange, fmt::format("PS2 logo: not shown, the game starts directly ({})", why));
+		return {};
+	}
+	return boot2;
+}
+
 // Called from recompilers; define is mandatory.
 void eeloadHook()
 {
@@ -737,6 +885,37 @@ void eeloadHook()
 		}
 		// else it's presumed that the invocation is "EELOAD <game ELF> <<launch args>>", coming from PS2LOGO, and we needn't do
 		// anything more
+
+		// PS5 port (2026-11-16, AI-assisted): PS2LOGO (started by our fast boot, see Ps2LogoBootPath) handed over to OSDSYS
+		// instead of the game (it couldn't take the disc's logo): the game is started directly, as fast boot would have.
+		if (s_ps2logo_state == Ps2LogoState::Running && argc > 1 && elfname.starts_with("rom0:OSDSYS"))
+		{
+			Console.Warning(fmt::format("PS2 logo: PS2LOGO went to {} {} instead of the game; starting {} directly", elfname,
+				argc > 2 ? (const char*)PSM(memRead32(cpuRegs.GPR.n.a1.UD[0] + 8)) : "", s_ps2logo_game));
+			s_ps2logo_state = Ps2LogoState::Off;
+			u32 str = 0;
+			for (u32 a = EELOAD_START; a < EELOAD_START + EELOAD_SIZE; a += 8)
+			{
+				if (!strcmp((char*)PSM(a), "rom0:OSDSYS"))
+				{
+					str = a;
+					break;
+				}
+			}
+			if (str)
+			{
+				strcpy((char*)PSM(str), s_ps2logo_game.c_str());
+				memWrite32(cpuRegs.GPR.n.a1.UD[0] + 4, str);
+				cpuRegs.GPR.n.a0.SD[0] = 2;
+				elfname = s_ps2logo_game;
+			}
+		}
+		else if (s_ps2logo_state == Ps2LogoState::Running && argc > 1)
+		{
+			// PS2LOGO's launch of the game (anything later, such as the game going back to OSDSYS, is left alone)
+			Console.WriteLn(Color_StrongGreen, fmt::format("PS2 logo: PS2LOGO is starting {}", elfname));
+			s_ps2logo_state = Ps2LogoState::Off;
+		}
 	}
 #if DEBUG_LAUNCHARG
 	// This code fires in full/fast boot mode when EELOAD is called the first/only time. When EELOAD is not given any arguments,
@@ -758,13 +937,16 @@ void eeloadHook()
 		}
 		else
 		{
+			s_ps2logo_state = Ps2LogoState::Off; // a default EELOAD call again (PS2LOGO gave up): not again (s_ps2logo_tried)
 			CDVDDiscType disc_type;
-			std::string disc_elf;
-			cdvdGetDiscInfo(nullptr, &disc_elf, nullptr, nullptr, nullptr, &disc_type);
+			std::string disc_elf, disc_serial;
+			cdvdGetDiscInfo(&disc_serial, &disc_elf, nullptr, nullptr, nullptr, &disc_type);
 			if (disc_type == CDVDDiscType::PS2Disc)
 			{
 				// only allow fast boot for PS2 games
 				elfname = std::move(disc_elf);
+				// PS5 port (2026-11-16, AI-assisted): through rom0:PS2LOGO when it can be (g_ps2logo_boot)
+				s_ps2logo_game = Ps2LogoBootPath(elfname, disc_serial);
 			}
 			else
 			{
@@ -781,11 +963,33 @@ void eeloadHook()
 			{
 				if (!strcmp((char*)PSM(g_osdsys_str), "rom0:OSDSYS"))
 				{
+					if (!s_ps2logo_game.empty())
+					{
+						// PS5 port (2026-11-16, AI-assisted): rom0:PS2LOGO in its place; eeloadHook2() adds the game's path.
+						// PS2LOGO's own launch of the game is the next ELF loaded (eeloadHook's argc branch above).
+						strcpy((char*)PSM(g_osdsys_str), "rom0:PS2LOGO");
+						// The logo on the disc comes through the drive's decryption (CDVD DEC-SET: XOR with key byte 4,
+						// then a rotate), and PS2LOGO doesn't read the disc key itself: on a PS2 the key is in the drive
+						// from OSDSYS's own disc check before it starts PS2LOGO. Fast boot skips OSDSYS, so the key
+						// was never read and PS2LOGO got the logo still encrypted, refused it and went to OSDSYS
+						// "BootBrowser" (console logs 2026-11-16: one ReadCD of sectors 0-11, then Exit). The key is
+						// read here as that disc check reads it (CdReadKey, cdvdReadKey: from the disc's serial; the game's
+						// own ELF load reads it again later).
+						cdvdReadKey(0, 0, 75, &cdvd.Key[0]);
+						cdvd.KeyXor = 0x00;
+						s_ps2logo_state = Ps2LogoState::Pending;
+						s_ps2logo_tried = true;
+						Console.WriteLn(Color_StrongGreen, fmt::format("PS2 logo: starting rom0:PS2LOGO {}", s_ps2logo_game));
+						elfname.clear(); // the game's ELF is loaded later, from PS2LOGO (as in a full boot)
+						break;
+					}
 					// Overwrite OSDSYS with game's ELF name
 					strcpy((char*)PSM(g_osdsys_str), elfname.c_str());
 					break;
 				}
 			}
+			if (s_ps2logo_state != Ps2LogoState::Pending)
+				s_ps2logo_game.clear();
 		}
 		else
 		{
@@ -813,6 +1017,27 @@ void eeloadHook()
 // Only called if g_SkipBiosHack is true
 void eeloadHook2()
 {
+	// PS5 port (2026-11-16, AI-assisted): the logo boot's PS2LOGO call (eeloadHook): {"rom0:PS2LOGO", BOOT2, <launch args>}, as
+	// OSDSYS's LoadExecPS2("rom0:PS2LOGO", [BOOT2]) gives it; PS2LOGO passes the launch arguments on to the game.
+	if (s_ps2logo_state == Ps2LogoState::Pending)
+	{
+		s_ps2logo_state = Ps2LogoState::Running;
+		std::string line = "rom0:PS2LOGO " + s_ps2logo_game;
+		if (!EmuConfig.CurrentGameArgs.empty())
+			line += " " + EmuConfig.CurrentGameArgs;
+		strcpy((char*)PSM(g_osdsys_str), line.c_str());
+		const int argc = ParseArgumentString(g_osdsys_str);
+		const uptr block_start = g_osdsys_str - (argc * 4);
+		for (int a = 0; a < argc; a++)
+			memWrite32(block_start + (a * 4), g_argPtrs[a]);
+		cpuRegs.GPR.n.a0.SD[0] = argc;
+		cpuRegs.GPR.n.a1.UD[0] = block_start;
+		// This EELOAD's strings are not used again: a later EELOAD (PS2LOGO's launch of the game) is a fresh copy, and its
+		// call here must not be given these arguments.
+		g_osdsys_str = 0;
+		return;
+	}
+
 	if (EmuConfig.CurrentGameArgs.empty())
 		return;
 

@@ -18,11 +18,16 @@
 #include "fe_texpacks.h"
 #include "fe_text.h"
 #include "fe_update.h"
+#include "shelf3/s3_app.h" // shelf v3 (AI-assisted)
 
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
+
+#ifndef PS5SX2_APP_TITLE
+#define PS5SX2_APP_TITLE "PlayStation 2" // the app's name; a build may set its own (make PS5SX2_APP_TITLE="...")
+#endif
 
 namespace fe
 {
@@ -94,6 +99,9 @@ struct AppConfig
 	// and serial (false when none); drive_disc_reask asks the watcher about it again (the question comes back as disc_ask_poll's).
 	std::function<bool(std::string& title, std::string& serial)> drive_disc_poll;
 	std::function<void()> drive_disc_reask;
+	// shelf v3 (AI-assisted): opens the drive's tray / pushes the disc out (START STOP UNIT with LoEj, through the drive's pass device).
+	// False and `why` when the drive refused or there was none. Unset: no Eject.
+	std::function<bool(std::string& why)> drive_eject;
 	// gamedb (2026-10-30, AI-assisted; #bugs: a disc game ignored its own settings): the settings file stem of disc `serial` (fe_discsettings.h, the
 	// file a start from the drive reads), for the entries of the disc in the drive and of a disc being copied: their sheet is the disc's own.
 	// Unset or "": those entries open only the all-games sheet.
@@ -120,6 +128,16 @@ struct AppConfig
 	// back within seconds). Unset: no row.
 	std::function<bool()> reload_tile_on;
 	std::function<bool(bool on)> set_reload_tile;
+	// ps2-console-shelf (AI-assisted): the PS2 system software's flow. The shelf opens on the Home screen (the PS2 main menu), unless
+	// `returning` (the player came back from a game with L1 + R1 + Touch): then the boot towers rise from `play_history` (serial and
+	// seconds played, PCSX2's playtime.dat) and the Library opens on the last game. `app_title`: the name the Home screen's version
+	// line gives this build.
+	bool returning = false;
+	std::vector<std::pair<std::string, uint64_t>> play_history;
+	std::string app_title = PS5SX2_APP_TITLE; // (build variable, default "PlayStation 2")
+	bool start_library = false; // start on the Library, not Home (the host's older scripts, which press straight on the shelf)
+	bool last_played = false;   // P2-01: `preselect` is the game really played last (lastgame.txt matched it): Home offers Continue
+	bool after_bios_startup = false; // P2-24: the BIOS's own startup just played (and its sound): Home without startup.wav
 };
 
 class App
@@ -130,7 +148,7 @@ public:
 
 	// chdscan (AI-assisted): the games, once the scan that Init's empty shelf waited for is done (the cover service was started with the
 	// same list). `preselect` is picked unless the player has moved on the shelf meanwhile (a disc drive's entry may be there).
-	void SetGames(std::vector<GameInfo> games, int preselect);
+	void SetGames(std::vector<GameInfo> games, int preselect, bool last_played = false); // P2-01: last_played as AppConfig's
 
 	// Advances `dt` seconds with the pad's current buttons.
 	void Update(double dt, const Input& in);
@@ -144,13 +162,19 @@ public:
 
 	// True once a game was picked and its launch animation has played.
 	bool Done() const { return m_done; }
+	// shelf v3: Play on the disc question spins the disc up first; the watcher's launch request waits for it (fe_ps5.cpp).
+	bool DiscSpinUpHolds() const { return m_s3.spin_t0 >= 0 && m_time - m_s3.spin_t0 < kDiscSpinUp; }
+	static constexpr double kDiscSpinUp = 2.0;
+	static constexpr double kLaunchFade = 0.55; // shelf v3: the game page's fade to black as a game starts
 	// vk-285-137: an index in the list Init got (games hidden from the shelf are still in it).
-	int Chosen() const { return m_index.empty() ? m_selected : m_index[static_cast<size_t>(m_selected)]; }
+	int Chosen() const { return m_s3.launch_index >= 0 ? m_s3.launch_index : m_index.empty() ? m_selected : m_index[static_cast<size_t>(m_selected)]; } // shelf v3: or the picked disc
 	// 2026-10-08: true when Done() came from the sheet's "PS2 system menu", not a game.
 	bool SystemMenuChosen() const { return m_system_menu; }
 	// bioscheck: a start asked of the shelf from outside it (Play from disc, a finished copy): true when it may go (there is a BIOS);
 	// false when there is none: the BIOS question comes up for it (once a path), and the request is not taken.
 	bool OfferOutsideLaunch(const std::string& path);
+	// P2-20b: the settings for all games, as Home's System Configuration opens them (the sheets no longer switch with L1 / R1).
+	void OpenSettingsForAllGames() { OpenSheet(true); }
 	// bioscheck: a start from outside the shelf that waited on the BIOS question and may go now (the open BIOS was picked); "" for none.
 	std::string TakeApprovedLaunch();
 	bool BiosMissing() const { return m_bios_missing; }
@@ -202,6 +226,7 @@ public:
 	int TilePending() const { return m_tile.PendingCount(); }
 
 private:
+	S3_APP_MEMBERS // shelf v3 (AI-assisted): the v3 screens' state and code (shelf3/s3_app.h, s3_app.inc)
 	struct Slot
 	{
 		Texture* cover = nullptr;
@@ -221,6 +246,7 @@ private:
 		float glow[3] = {0.55f, 0.42f, 1.0f};
 		bool has_glow = false;
 		bool wanted = false; // 2026-10-10: asked of the cover service (near the selection); textures only while it is
+		double shown_at = -1; // P2-04: when the case could first be drawn (it fades in from then instead of popping up)
 	};
 
 	bool Step(int dir); // true when the selection moved
@@ -239,7 +265,12 @@ private:
 	void CloseSheet();
 	void UpdateSheet(double dt, const Input& in);
 	bool SheetMove(int dir); // false at either end
-	void BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent);
+	// P2-20: System Configuration's two levels. A page's rows fall into a few sections (Picture, Speed and fixes, Game, ...: the
+	// option groups merged; Recommended and the reset row stand alone); the sheet opens on the list of sections, one at a time
+	// as the PS2's top list, and Cross goes into one: its own turning list. A one-row section acts from the top list.
+	void SheetSections();          // m_sections from the page's rows, m_sheet_section / m_sheet_row kept inside them
+	bool SheetStep(int dir);       // up / down at the level shown; false at either end
+	bool SheetInSection() const { return m_sheet_level == 1; }
 	void RefreshBadges();
 	// 2026-10-05: the sheet's HD texture pack row (fe_texpacks.h): its buttons, what it shows, its help line, and the
 	// shelf's line while a pack is on its way.
@@ -263,8 +294,109 @@ private:
 	std::string HomeTileHelp() const;
 	std::string TexturePackValue(const TexturePackStatus& s, int pick) const;
 	std::string TexturePackHelp(const TexturePackStatus& s, int pick, const std::string& serial) const;
-	void BuildTexturePackActivity(std::vector<UiVertex>& ui, float x, float y, float k, uint32_t accent);
 	void PollCovers();
+	// ---- ps2-console-shelf (AI-assisted; fe_ps2ui.cpp): the screens of the PS2 system software ----
+	// Home (the PS2 main menu): Play Games, Settings, RetroAchievements, Web settings, the disc in the drive. Browser (where games live,
+	// the PS2 Browser's lit field): the Library, each place games come from, and the disc slot. Library (the Memory Card screen): the
+	// games as floating cases. The sheets, the account, the disc question and the rest come over any of them, full screen.
+	enum class Screen
+	{
+		Home,
+		Browser,
+		Library,
+	};
+	enum class HomeItem
+	{
+		Continue, // P2-01: the game played last, started with one press
+		PlayGames,
+		Settings,
+		Achievements,
+		Disc, // P2-16: Web Settings moved to the sheet for all games
+	};
+	struct Source
+	{
+		std::string prefix; // a game's path starts with it ("" for every game)
+		std::string label;  // "Library", "USB drive 1", ...
+		int count = 0;
+		int kind = 0;       // 0 the library, 1 internal, 2 USB, 3 network
+	};
+	enum class BrowserKind
+	{
+		Source,
+		DiscSlot,
+	};
+	void GoTo(Screen screen);
+	void UpdateHome(const Input& in);
+	void UpdateBrowser(const Input& in);
+	int HomeItems(HomeItem* out) const; // the items shown now
+	int BrowserCount() const { return static_cast<int>(m_sources.size()) + 1; } // the sources, then the disc slot
+	void RebuildSources();
+	bool SourceMatches(const GameInfo& g) const;
+	void SetSource(int source);
+	void SetupFog(FrameDesc& f, int palette, float W, float H) const; // 0 black, 1 browser field, 2 indigo, 3 navy, 4 boot, 5 a page in the browser (P2-27)
+	void BuildHome(FrameDesc& f, float W, float H, const std::string& clock);
+	void BuildBrowser(FrameDesc& f, float W, float H, const std::string& clock);
+	void BuildLibrary(FrameDesc& f, float W, float H, const std::string& clock);
+	void BuildSheetPs2(FrameDesc& f, float W, float H, const std::string& clock);
+	// P2-19: System Configuration's field behind both sheets: the clock's rods, `cubes` glass cubes down the left (the `lit` one the
+	// focus's), the dark hub with the main menu's lights, the marbled indigo, the date and time. Returns the entry's progress for the words.
+	float BuildSysconfField(FrameDesc& f, float W, float H, int cubes, int lit, float in);
+	void BuildSysconfHeader(std::vector<UiVertex>& ui, float W, float H); // P2-20b: its date and time, sharp over the soft focus
+	float m_field_head = 0; // P2-20b: how far the corners are in
+	void BuildDiscAskPs2(FrameDesc& f, float W, float H);
+	void BuildReturn(FrameDesc& f, float W, float H);
+	void BuildBottomLines(std::vector<UiVertex>& ui, float W, float H); // the BIOS, GameIndex and texture pack lines
+	void GridPose(int pos, float t, Mat4& model, float& scale, Vec2& screen) const;
+	float LibraryArrive(int pos) const; // P2-26 (was P2-03's drift): 0 .. 1, the case's growth from a point as the Library comes in
+	Screen m_screen = Screen::Home;
+	double m_screen_time = -10;   // when the screen changed (its content fades in)
+	Screen m_prev_screen = Screen::Home; // P2-02: the screen fading out (drawn until m_screen_time)
+	double m_prev_screen_time = -10;     // P2-02: when that one had come in
+	// P2-26: the PS2 Browser's page change: 1 Browser -> Library (the picked object flies at the eye, then the page's items grow from
+	// points), -1 back (the items shrink to points, then the object flies back out to its place); 0 any other change (through black).
+	int m_zoom = 0;
+	double m_zoom_time = -10; // when it began
+	int m_zoom_item = 0;      // the Browser object flown into
+	float BrowserFly() const; // 0 (in its place) .. 1 (at the eye), and the words' and bloom's share
+	int m_home_row = 0;
+	int m_continue_index = -1;    // P2-01: Init's index of the game played last (-1: none known)
+	bool ContinuePos(int& pos) const; // P2-01: its place on the shelf now, when it can be started from Home
+	int m_home_lit = -1;          // P2-13: the item lit now (the orb stays put; only the highlight moves, fading over)
+	int m_home_lit_prev = -1;     // P2-13: the one fading back to grey
+	double m_home_lit_time = -10; // P2-13: when the highlight moved
+	// P2-23: the main menu's lights run on one clock from the first time Home shows (their fly-in, once) and carry on across every
+	// screen; they glide between Home's place and the System Configuration hub as the sheet comes and goes, as the PS2's do.
+	double m_lights_t0 = -1;
+	float LightsTime(bool fly_in);
+	float m_home_orb[3] = {-1, 0, 0}; // Home's ring: centre x, y, radius (the last Home drawn)
+	float m_hub_orb[3] = {-1, 0, 0};  // the sheet's hub: centre x, y, radius
+	bool m_sheet_over_home = false;   // the sheet was opened from Home (its lights glide in from there, and back)
+	double m_sheet_close_time = -100;
+	double SheetExit() const;         // seconds since the sheet closed back to Home while that is still playing, else -1
+	float SheetLightsAt() const;      // 0: the lights at Home's place, 1: at the hub
+	bool m_home_version = false;  // Triangle on Home: Version Information
+	bool m_home_credits = false;  // P2-16: Square there: the credits and licence, one level deeper
+	int m_browser_item = 0;
+	float m_browser_focus[8] = {};   // P2-17: each Browser object's focus, eased: the glow and lift blend over its float, which never restarts
+	float m_browser_disc_turn = 0;   // P2-17: the disc slot's own turn (faster while focused, without a jump)
+	double m_browser_anim_time = -1; // P2-17: when those were last eased
+	std::vector<Source> m_sources;
+	int m_source = 0;             // the Library's source (0: every game)
+	float m_grid_scroll = 0, m_grid_scroll_vel = 0; // the Library's top row, sprung
+	bool m_startup_played = false;
+	double m_return_until = -1;   // the boot towers' sequence ends then (m_time)
+	struct Tower
+	{
+		float x, z, h;
+	};
+	std::vector<Tower> m_towers;
+	std::string m_browser_note;   // a line on the Browser for a few seconds (the disc slot's answer)
+	double m_browser_note_time = -10;
+	int m_texpack_done_state = -1; // the texture pack's last state seen on the shelf (done.wav when one finishes)
+	std::string m_texpack_done_serial;
+	int m_grid_target = 0;        // the Library's top row as wanted
+	float m_grid_up = 0, m_grid_down = 0; // P2-21: the Library's blue scroll arrows (0 .. 1), faded in seconds
+	std::vector<int> m_ps2_rows_scratch;
 	// live-22 (AI-assisted): a disc being copied shows as a spinning-disc entry at the front of the shelf with its live
 	// percentage (AppConfig::disc_dump_progress). PollDiscDump reads the dumper's status file (throttled), inserts the
 	// synthetic entry when a copy starts, keeps its percent up to date, and drops it when the copy ends. The entry is a
@@ -304,6 +436,8 @@ private:
 	Texture* m_dump_disc = nullptr;
 	VkDescriptorSet m_dump_disc_set = VK_NULL_HANDLE;
 	float m_dump_disc_aspect = 1.0f; // width / height of the picture
+	bool m_dump_disc_front = false;  // P2-17: no disc art: the picture is the game's front, printed as the label of a silver disc
+	void DiscArtQuad(std::vector<UiVertex>& ui, float cx, float cy, Vec2 ax, Vec2 ay, float spin, float alpha); // P2-17
 	void KeepCoversNear();                // 2026-10-10: asks for the games near the selection, drops the rest's textures
 	void DropCovers(Slot& s, int index); // its textures and set freed, the service told
 	// vk-285-135 (AI-assisted; swordpdf: "i also want to pick a folder though the browser in the shelf"): the folder picker of the
@@ -352,7 +486,6 @@ private:
 	// 2.04: the question about a disc just put in (AppConfig::disc_ask_poll), a panel over the shelf.
 	void PollDiscAsk();
 	void UpdateDiscAsk(const Input& in);
-	void BuildDiscAsk(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent);
 	bool m_ask_on = false;
 	std::string m_ask_title, m_ask_serial;
 	int m_ask_sel = 0;     // 0 play from the disc, 1 copy it first
@@ -379,9 +512,11 @@ private:
 		double held_for = 0, next_repeat = 0;
 		float kb_anim = 0;    // the keyboard's slide
 		float pill_anim = 0;  // the search line's fade
+		float kb_x = 0, kb_y = 0, kb_w = 0, kb_h = 0; // P2-22: where BuildSearch put the keyboard last (its prompts go under it)
 	};
 	Search m_search;
 	int m_search_return = -1; // the game picked when a search first narrowed the shelf (an index of Init's list)
+	int m_search_before = -1, m_search_before_top = 0; // P2-22: the Library's game (Init's index) and top row before the search
 	bool SearchMatches(const GameInfo& g) const;
 	void SetSearch(const std::string& text); // the shelf narrowed to it ("" shows every game again)
 	void OpenSearch();
@@ -410,7 +545,6 @@ private:
 	void PollBackHolds(int sel_index);  // each frame: the held backs of cases that are turned back to the front go
 	int m_ring_count = 0, m_ring_first = -1;
 	int m_last_dir = 1;      // which way the selection last moved (the neighbours that way come first)
-	void Pose(float d, float t, Mat4& model, float& brightness) const;
 
 	Renderer* m_renderer = nullptr;
 	const Fonts* m_fonts = nullptr;
@@ -467,6 +601,26 @@ private:
 	bool m_sheet_global = false;
 	float m_sheet_anim = 0;
 	int m_sheet_row = 0;
+	float m_sheet_slide = 0;        // P2-05: the drum's glide, in rows (0 at rest), after the focus moved
+	int m_sheet_slide_row = -1;     // P2-05: the focused row the glide was last worked out for
+	double m_sheet_slide_time = -1; // P2-05: when
+	double m_sheet_open_time = -100; // P2-19: when the sheet came in (its field's entry; nothing else restarts on a move)
+	float m_cube_lit[8] = {};        // P2-19: how lit each glass cube is (eases ~0.3 s to the focused one)
+	double m_cube_lit_time = -1;     // P2-19: when that was last worked out
+	struct SheetSection
+	{
+		std::string name, summary; // the summary: its groups' names (a one-row section: empty, the row's value shows)
+		std::vector<int> rows;     // its rows that can be picked, in the page's order
+	};
+	std::vector<SheetSection> m_sections; // P2-20
+	float m_table_anim = 0, m_table_scroll = 0; // P2-20b: the section table in (0..1), its scroll (1080-line units)
+	double m_table_time = -1, m_table_scroll_time = 0;
+	int m_table_section = -1;
+	int m_sheet_level = 0;                // P2-20: 0 the sections, 1 in m_sheet_section
+	int m_sheet_section = 0;
+	// P2-20: the turning list's crossfade: the PS2 fades the new item in over the old one, in place, in ~0.3 s ([0] now, [1] before).
+	std::string m_xf_label[2], m_xf_value[2];
+	double m_xf_label_time = -1, m_xf_value_time = -1;
 	float m_sheet_scroll = 0, m_sheet_scroll_target = 0;
 	int m_sheet_held_v = 0, m_sheet_held_h = 0;
 	double m_sheet_held_for = 0, m_sheet_next_repeat = 0;

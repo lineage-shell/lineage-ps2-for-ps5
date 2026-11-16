@@ -1,4 +1,5 @@
 // pcsx2-orbis boot smoke: VMManager init + Execute on worker + pc sampling.
+#include "orbis-shims/OrbisAppId.h" // ps2-console-shelf: the fork's title ID
 #include <atomic>
 #include <memory> // 2.02: orbis_probe_game_read
 #include <cstdarg>
@@ -34,6 +35,7 @@
 #include "../frontend/fe_i18n.h" // vk-285-110: the notifications' text
 #include "../frontend/fe_bios.h" // vk-285-134: the BIOS before the shelf
 #include "../frontend/fe_games.h" // vk-285-139: fe::DiscSet
+#include "../frontend/shelf3/s3_memcard.h" // shelf v3 (AI-assisted): the opening's towers card
 #include "../frontend/fe_discsettings.h" // gamedb (2026-10-30): a disc's settings file, the same rule as the shelf's
 #include "../frontend/fe_roots.h"    // 2026-10-16: the folders games are listed from (the ones you set only, or the usual places)
 #include "../frontend/fe_options.h"  // 2026-10-16: fe::SplitFolderList (PS5SX2/GameFolders)
@@ -118,6 +120,13 @@ static std::atomic<bool> g_orbis_menu_request{false};
 // the next start is told its wall clock (open-shelf.txt), so that one tester log has the whole gap from the press to the shelf. The second is the first note
 // of a leave that was not pressed (a game that failed to start).
 static std::atomic<long long> g_orbis_leave_press_us{0};
+// P2-24 (AI-assisted; kurolume: "add the startup animation ... use the BIOS"): a fresh start of the app plays the PS2's own startup from the
+// player's BIOS (the system menu with no disc, so no fast boot), then leaves for the shelf's Home as "back to the menu" does: at
+// s_startup_intro_end seconds of PS2 time (gs.ini PS5SX2/StartupAnimationEnd), or at once on any button. gs.ini
+// PS5SX2/StartupAnimation=false (the shelf's Settings: Startup animation) or flags/nostartup turn it off.
+static std::atomic<bool> g_orbis_startup_intro{false};
+static double s_startup_intro_end = 7.5;
+static bool s_startup_intro_returned = false; // this start follows the startup's leave: the shelf opens on Home (no towers)
 static std::atomic<long long> g_orbis_leave_first_us{0};
 
 // vk-285-51: the settings log (frontend/fe_ps5.h orbis_event_log): what the app did, beside what
@@ -1100,6 +1109,21 @@ static void *orbis_pad_thread(void *)
         fflush(stdout);
       }
     }
+    // P2-24: during the BIOS's startup any button (pressed after the first read) ends it; the BIOS gets no buttons meanwhile.
+    if (rc == 0 && g_orbis_startup_intro.load(std::memory_order_relaxed))
+    {
+      static uint32_t s_intro_held = 0xffffffffu;
+      const uint32_t held = (d.buttons & 0x0010FFFFu) | (d.l2 > 60 ? 0x100u : 0u) | (d.r2 > 60 ? 0x200u : 0u);
+      if (s_intro_held != 0xffffffffu && (held & ~s_intro_held) != 0 && !g_orbis_menu_request.load(std::memory_order_relaxed))
+      {
+        g_orbis_state_request.store(3, std::memory_order_release);
+        printf("[startup] a button: the BIOS's startup ends, the shelf opens\n");
+        fflush(stdout);
+      }
+      s_intro_held = held;
+      d.buttons = 0;
+      d.l2 = d.r2 = 0;
+    }
     if (rc == 0 && orbis_ingame_take_pad(port1, d))
     {
       // 2.31: the in-game menu has the controller (above); the game gets nothing.
@@ -1249,7 +1273,8 @@ static void *orbis_pad_thread(void *)
       {
         static bool s_prev_click = false, s_click_consumed = false;
         const bool click = (d.buttons & 0x00100000u) != 0; // the touchpad button
-        if (click && !s_prev_click && (d.buttons & 0x00000C00u) == 0x00000C00u) // L1 0x400, R1 0x800
+        // shelf v3 (kurolume, 2026-11-16): off; quitting is in the in-game menu (both sticks), one button for both as in the PS1 app.
+        if (false && click && !s_prev_click && (d.buttons & 0x00000C00u) == 0x00000C00u) // L1 0x400, R1 0x800
         {
           g_orbis_state_request.store(3, std::memory_order_release);
           s_click_consumed = true;
@@ -1750,7 +1775,85 @@ static void orbis_usb_kbm_for_mode(SettingsInterface& si)
 
 // eerec-285: gs.ini re-read while running (GSRenderer.cpp OrbisLiveTune sees the change, StubHost's
 // PumpMessagesOnCPUThread calls this at vsync on the CPU thread).
-static MemorySettingsInterface s_base_pre_gsini; // the base layer as it was before boot applied gs.ini
+static MemorySettingsInterface s_base_pre_gsini;
+
+// shelf v3 (AI-assisted): the BIOS's opening draws a tower for each game in the card's /BEDATA-SYSTEM/history (spec boot.md 2.8). For the
+// startup intro, a copy of the player's slot 1 card (memcards/shelf-intro.ps2; the card itself is not changed) gets a history built from
+// PCSX2's play time (playtime.dat): the 21 most played games, taller and wider the longer they were played. Slot 1 is that copy for the intro.
+static void orbis_shelf3_intro_card(MemorySettingsInterface &si)
+{
+  std::string slot1 = si.GetStringValue("MemoryCards", "Slot1_Filename", "Mcd001.ps2");
+  if (slot1.empty())
+    slot1 = "Mcd001.ps2";
+  std::string src = slot1[0] == '/' ? slot1 : EmuFolders::MemoryCards + "/" + slot1;
+  // A folder card in slot 1 (PCSX2's folder memory card) has no image to copy: the history goes on a copy of slot 2's card file instead.
+  if (FileSystem::DirectoryExists(src.c_str()))
+  {
+    std::string slot2 = si.GetStringValue("MemoryCards", "Slot2_Filename", "Mcd002.ps2");
+    if (slot2.empty())
+      slot2 = "Mcd002.ps2";
+    const std::string src2 = slot2[0] == '/' ? slot2 : EmuFolders::MemoryCards + "/" + slot2;
+    printf("[shelf3] towers: slot 1 is a folder card; using a copy of %s\n", src2.c_str());
+    src = src2;
+  }
+  struct Played
+  {
+    std::string serial;
+    unsigned long long secs;
+  };
+  std::vector<Played> played;
+  if (FILE *f = fopen("/data/PCSX2/playtime.dat", "r"))
+  {
+    char line[256];
+    while (fgets(line, sizeof(line), f))
+    {
+      if (strlen(line) < 34)
+        continue;
+      std::string serial(line, 32);
+      while (!serial.empty() && serial.back() == ' ')
+        serial.pop_back();
+      const unsigned long long secs = strtoull(line + 33, nullptr, 10);
+      if (!serial.empty() && secs > 0)
+        played.push_back({serial, secs});
+    }
+    fclose(f);
+  }
+  if (played.empty())
+  {
+    printf("[shelf3] towers: no play time yet\n");
+    return;
+  }
+  std::sort(played.begin(), played.end(), [](const Played &a, const Played &b) { return a.secs > b.secs; });
+  if (played.size() > 21)
+    played.resize(21);
+  std::vector<s3::MemoryCard::HistoryEntry> hist;
+  for (const Played &p : played)
+  {
+    s3::MemoryCard::HistoryEntry e;
+    e.id = p.serial;
+    const int hours = static_cast<int>(p.secs / 3600);
+    e.count = std::min(13, 1 + hours);                 // the main cell's height grows with the hours (13: full)
+    unsigned h = 0;
+    for (char c : p.serial)
+      h = h * 31 + static_cast<unsigned char>(c);
+    e.cell = static_cast<int>(h % 6);
+    for (int k = 0, extra = std::min(5, hours / 10); k < 6 && extra > 0; k++) // every 10 hours one more full cell
+      if (k != e.cell)
+        e.mask |= 1 << k, extra--;
+    hist.push_back(e);
+  }
+  s3::MemoryCard card;
+  const std::string out = EmuFolders::MemoryCards + "/shelf-intro.ps2";
+  if (!card.Open(src) || !card.formatted() || !card.WriteHistoryCopy(hist, out))
+  {
+    printf("[shelf3] towers: no copy of %s (%s)\n", src.c_str(), card.ok() && !card.formatted() ? "unformatted" : card.problem().c_str());
+    return;
+  }
+  si.SetStringValue("MemoryCards", "Slot1_Filename", "shelf-intro.ps2");
+  si.SetBoolValue("MemoryCards", "Slot1_Enable", true);
+  printf("[shelf3] towers: %zu games from the play time, on a copy of %s\n", hist.size(), src.c_str());
+  fflush(stdout);
+} // the base layer as it was before boot applied gs.ini
 extern std::atomic<int> g_orbis_live_reapply;
 void OrbisOSDLabel(const char* text);
 
@@ -1939,6 +2042,17 @@ static void sys_notify(const char* msg)
   memset(&req, 0, sizeof(req));
   strncpy(req.message, msg, sizeof(req.message) - 1);
   sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+}
+
+// shelf v3 (AI-assisted): success / progress notes (starting, now playing, a new build) only on test builds; a release sends
+// notifications for errors only.
+extern "C" int g_orbis_test_build;
+static void sys_notify_info(const char* msg)
+{
+  if (g_orbis_test_build > 0)
+    sys_notify(msg);
+  else
+    printf("[notify] (not shown) %s\n", msg);
 }
 
 #ifndef ORBIS_BUILD_TAG
@@ -2152,9 +2266,32 @@ void OrbisBackToMenuCpu()
   g_orbis_leave_press_us.store(orbis_steady_us(), std::memory_order_relaxed); // 176: first of all, before any line is written
   printf("[menu] back to the menu: stopping the VM\n");
   fflush(stdout);
+  // shelf v3 (AI-assisted): Auto Save (PS5SX2/AutoSave, the game's settings or all games'): a resume state before the VM stops; the
+  // shelf's game page offers it first, as Auto.
+  if (!g_orbis_startup_intro.load(std::memory_order_relaxed) && VMManager::HasValidVM() && Host::GetBoolSettingValue("PS5SX2", "AutoSave", false))
+  {
+    std::string err;
+    VMManager::SaveStateToSlot(-1, false, [&err](const std::string &e) { err = e; });
+    printf("[shelf3] auto save: %s\n", err.empty() ? "saved" : err.c_str());
+    fflush(stdout);
+  }
   orbis_eventf("back to the menu");
   OrbisOSDLabel("BACK TO MENU");
   VMManager::SetState(VMState::Stopping);
+}
+
+// P2-24: at vsync on the CPU thread (StubHost.cpp PumpMessagesOnCPUThread): the BIOS's startup has played to its end (PS2 time, so a slow
+// start doesn't cut it short): back to the shelf.
+void OrbisStartupIntroTick()
+{
+  if (!g_orbis_startup_intro.load(std::memory_order_relaxed) || g_orbis_menu_request.load(std::memory_order_relaxed))
+    return;
+  const double t = static_cast<double>(cpuRegs.cycle) / PS2CLK;
+  if (t < s_startup_intro_end)
+    return;
+  printf("[startup] the BIOS's startup played (%.2f s of PS2 time): the shelf opens\n", t);
+  fflush(stdout);
+  OrbisBackToMenuCpu();
 }
 
 // vk-285-109: the end of the process without the static destructors and exit handlers, which abort when
@@ -2297,7 +2434,7 @@ static std::string orbis_menu_exec_path()
   {
     printf("[menu] this process is a disc tile (drive %s) but its folder under /data/homebrew wasn't found: PPSA99203's eboot is used\n",
       s_tile_marker_drive.c_str());
-    return "/data/homebrew/PPSA99203/eboot.bin";
+    return PS5SX2_APP_DIR "/eboot.bin";
   }
   return orbis_self_exec::kOwnEbootPath;
 }
@@ -2515,7 +2652,7 @@ static bool orbis_leave_start_relay(const OrbisLeaveFlags& fl)
     return false;
   // The title the system will close: this tile's (its folder's name), the main app's, or unknown (a tile whose folder was not found: the payload then
   // goes by the id of the running big app).
-  std::string closing = "PPSA99203";
+  std::string closing = PS5SX2_TITLE_ID;
   const std::string tile = orbis_own_tile_dir();
   if (!tile.empty())
     closing = tile.substr(tile.find_last_of('/') + 1);
@@ -2524,7 +2661,7 @@ static bool orbis_leave_start_relay(const OrbisLeaveFlags& fl)
   std::string why;
   OrbisRelaunchTiming timing;
   timing.settle_ms = fl.settle_ms;
-  const bool ok = OrbisRelaunchStart(closing.c_str(), "PPSA99203", static_cast<int>(getpid()), why, timing);
+  const bool ok = OrbisRelaunchStart(closing.c_str(), PS5SX2_TITLE_ID, static_cast<int>(getpid()), why, timing);
   printf("[menu] relaunch payload (closing title '%s', settle %d ms, not before %d ms after the process exit, retry %d ms): %s\n", closing.c_str(), timing.settle_ms,
     timing.min_exit_ms, timing.retry_ms, ok ? "up" : why.c_str());
   fflush(stdout);
@@ -2612,7 +2749,7 @@ static bool orbis_leave_process(bool relay, const OrbisLeaveFlags& fl)
     printf("[menu] the tile's own eboot didn't take: PPSA99203's is tried\n"); // 2.11
     fflush(stdout);
     orbis_mark_open_shelf(orbis_leave::kMainTitle); // fix180
-    exec_rc = orbis_exec_for_menu("/data/homebrew/PPSA99203/eboot.bin");
+    exec_rc = orbis_exec_for_menu(PS5SX2_APP_DIR "/eboot.bin");
   }
   orbis_leave_note("exec: eboot returned");
   const bool waiting = orbis_leave::AfterExecReturn(exec_rc) == orbis_leave::AfterExec::KeepWaiting; // accepted, merely outlived the wait: the notes stay
@@ -2629,10 +2766,38 @@ static bool orbis_leave_process(bool relay, const OrbisLeaveFlags& fl)
 
 // vk-285-109: our own eboot again, into the shelf, after a start that failed (the VM never ran, so no memory
 // card or NVRAM to write back). Returns when LoadExec doesn't take.
+static void orbis_mark_startup_intro()
+{
+  if (!g_orbis_startup_intro.load(std::memory_order_relaxed))
+    return;
+  if (FILE* f = fopen(OrbisLogPath("startup-intro.txt").c_str(), "wb"))
+  {
+    fprintf(f, "%lld\n", static_cast<long long>(time(nullptr)));
+    fclose(f);
+  }
+}
+// P2-24: read and removed by every start; true when the leave before this start ended the BIOS's startup (in the last three minutes).
+static bool orbis_take_startup_intro_mark()
+{
+  const std::string path = OrbisLogPath("startup-intro.txt");
+  long long sec = 0;
+  if (FILE* f = fopen(path.c_str(), "rb"))
+  {
+    if (fscanf(f, "%lld", &sec) != 1)
+      sec = 0;
+    fclose(f);
+    unlink(path.c_str());
+  }
+  const long long age = static_cast<long long>(time(nullptr)) - sec;
+  return sec > 0 && age >= 0 && age < 180;
+}
+bool orbis_startup_intro_returned() { return s_startup_intro_returned; }
+
 static void orbis_restart_to_menu()
 {
   printf("[menu] the game didn't start: leaving for the shelf\n");
   fflush(stdout);
+  orbis_mark_startup_intro(); // P2-24: the BIOS's startup didn't start: the shelf opens on Home all the same
   orbis_leave_note("begin: the game didn't start");
   const OrbisLeaveFlags fl = orbis_leave_flags();
   const long long t_relay = orbis_steady_us();
@@ -2659,6 +2824,7 @@ static void orbis_back_to_menu()
   printf("[menu] VM stopped; writing the memory cards and the NVRAM back\n");
   fflush(stdout);
   orbis_leave_note("begin: VM stopped");
+  orbis_mark_startup_intro(); // P2-24: the shelf that opens next is Home, not the towers
   SPU2::SetOutputPaused(true); // first: no looping sound while the payload's handshake below waits
   const OrbisLeaveFlags fl = orbis_leave_flags();
   const long long t_relay = orbis_steady_us();
@@ -3835,8 +4001,8 @@ static void orbis_probe_game_read(const std::string& path)
 
 static void orbis_vk_param_json()
 {
-  static const char* const paths[] = {"/mnt/sandbox/PPSA99203_000/app0/sce_sys/param.json", "/app0/sce_sys/param.json",
-                                      "/data/homebrew/PPSA99203/sce_sys/param.json"};
+  static const char* const paths[] = {"/mnt/sandbox/" PS5SX2_TITLE_ID "_000/app0/sce_sys/param.json", "/app0/sce_sys/param.json",
+                                      PS5SX2_APP_DIR "/sce_sys/param.json"};
   std::string tried;
   for (const char* path : paths)
   {
@@ -4175,7 +4341,8 @@ int main()
     fflush(stdout);
     OrbisExitApp(0);
   }
-  sys_notify(fe::Tr(g_orbis_test_build > 0 ? fe::Str::NotifyStartingTest : fe::Str::NotifyStarting)); // vk-285-50: the new name
+  // shelf v3 (AI-assisted): no "starting" toast (it showed top-left through the PS2 opening); test builds keep theirs.
+  sys_notify_info(fe::Tr(g_orbis_test_build > 0 ? fe::Str::NotifyStartingTest : fe::Str::NotifyStarting)); // vk-285-50: the new name
   orbis_boot_phase("start-up notification sent");
   // vk-285-44: only the cover downloads run before the HEN jailbreak. HTTPS from the frontend
   // failed after it (vk-285-41/42: the handshake to raw.githubusercontent.com hung, or ended in
@@ -4331,7 +4498,7 @@ int main()
         fflush(stdout);
         return;
       }
-      const char* path = "/data/homebrew/PPSA99203/eboot.bin";
+      const char* path = PS5SX2_APP_DIR "/eboot.bin";
       struct stat st0{};
       int rc0 = stat(path, &st0);
       printf("[boot] eboot watcher: path=%s rc=%d errno=%d size=%lld mtime=%lld\n", path, rc0,
@@ -4366,7 +4533,7 @@ int main()
           continue; // still being written: keep the original baseline and re-check
         printf("[boot] new eboot detected (%lld bytes), restarting into it\n", (long long)st2.st_size);
         fflush(stdout);
-        sys_notify("PS5SX2: new build, restarting");
+        sys_notify_info("PS5SX2: new build, restarting");
         ps5::debug::set_line(2, "NEW BUILD - RESTARTING");
         sleep(1);
         orbis_output_default();
@@ -4525,6 +4692,7 @@ int main()
   // 2.11: a start that follows "back to the menu" (L1 + R1 + touchpad, or a game that failed to start): the shelf opens. Neither the tile's
   // marker nor the bootdisc flag starts the disc in the drive again then. Taken once, and only when it is fresh.
   const bool open_shelf = orbis_take_open_shelf_mark(&s_leave_mark, true); // fix180: only a note addressed to this title (a tile press after a leave of the main app starts its game)
+  s_startup_intro_returned = orbis_take_startup_intro_mark() && open_shelf; // P2-24
   if (open_shelf)
   {
     printf("[boot] opened by \"back to the menu\": the shelf opens, the disc in the drive isn't started again%s\n",
@@ -4787,6 +4955,25 @@ int main()
         orbis_exit_quietly(0);
     }
   }
+  // P2-24: a fresh start (not back from a game, not a tile, nothing chosen yet) with the player's own BIOS plays its startup first.
+  if (s_game_path.empty() && !open_shelf && !orbis_is_tile_start() && !s_tile_is_game && s_bios_refused.empty() && !orbis_flag("nofrontend") &&
+      !orbis_flag("nomenu") && !orbis_flag("nostartup") && orbis_gs_ini_bool("StartupAnimation", true) &&
+      orbis_gs_ini_bool("StartupBiosRun", false)) // shelf v3 round 2: the shelf draws the opening itself (seamless into its menu); the BIOS run only on request
+  {
+    if (orbis_bios_use() == OrbisBios::Use::Own)
+    {
+      const double end = atof(orbis_gs_ini_string("StartupAnimationEnd").c_str());
+      if (end >= 2.0 && end <= 30.0)
+        s_startup_intro_end = end;
+      s_game_path = kOrbisSystemMenuPath;
+      g_orbis_startup_intro.store(true);
+      printf("[startup] the BIOS's own startup first (%.1f s of PS2 time, or a button), then the shelf\n", s_startup_intro_end);
+      orbis_eventf("startup animation: the BIOS's own (PS5SX2/StartupAnimation)");
+    }
+    else
+      printf("[startup] no BIOS of the player's own: no startup animation\n");
+    fflush(stdout);
+  }
   orbis_boot_phase("shelf starting (its game scan and first frame are timed in its own [frontend] lines)");
   if (s_game_path.empty() && !orbis_flag("nofrontend") && !orbis_flag("nomenu"))
     s_game_path = orbis_frontend_run(orbis_frontend_paths(!orbis_flag("nocoverdl")), ORBIS_BUILD_TAG, &frontend_ran);
@@ -4837,7 +5024,7 @@ int main()
         snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyNoBios), (orbis_bios_dir_shown() + "/").c_str());
         sys_notify(msg);
       }
-      if (frontend_ran || s_game_tile_started)
+      if (frontend_ran || s_game_tile_started || g_orbis_startup_intro.load())
         orbis_restart_to_menu();
       orbis_exit_quietly(1);
     }
@@ -5160,6 +5347,23 @@ int main()
     }
     fflush(stdout);
   }
+  // 2026-11-16 (AI-assisted; kurolume: the "PlayStation 2" logo screen before every game, as a real PS2 shows it): a fast-booted PS2
+  // disc goes through the BIOS's own rom0:PS2LOGO with SYSTEM.CNF's BOOT2, as OSDSYS launches it, so the logo on the disc shows
+  // (with its fade) and then the game starts; no Sony opening, no towers, no System Configuration (pcsx2/R5900.cpp eeloadHook,
+  // Ps2LogoBootPath). PS5SX2/BootLogo=false turns it off. Not with OpenPS2BIOS (it has no PS2LOGO) and not for an ELF; the
+  // core also starts the game directly for a disc whose region isn't the BIOS's, a disc with no logo, a BIOS without
+  // PS2LOGO, fast-boot fast-forward, or when PS2LOGO hands back to OSDSYS. PS1 discs and full boots are untouched.
+  {
+    extern bool g_ps2logo_boot;
+    MemorySettingsInterface peek = s_base_si;
+    orbis_apply_gs_ini(peek, true);
+    const bool on = peek.GetBoolValue("PS5SX2", "BootLogo", true);
+    const bool elf = s_game_path.size() > 4 && strcasecmp(s_game_path.c_str() + s_game_path.size() - 4, ".elf") == 0;
+    g_ps2logo_boot = on && !s_bios_open && !elf && !s_game_path.empty() && s_game_path != kOrbisSystemMenuPath;
+    printf("[boot] PS2 logo before the game: %s\n", g_ps2logo_boot ? "on (PS5SX2/BootLogo)" :
+      !on ? "off (PS5SX2/BootLogo)" : s_bios_open ? "off (OpenPS2BIOS has no PS2LOGO)" : "off (not a disc game)");
+    fflush(stdout);
+  }
 #ifdef ORBIS_VULKAN
   // live-9 (AI-assisted; swordpdf: "just have this setting be the standard for rac1 for everyone"): Ratchet & Clank (1) gets the
   // setup that held 60 fps / 100% at its heavy spot on his base PS5 (fw 4.03, 2026-10-10; claude/rac1-base-ps5.md), where the
@@ -5322,6 +5526,8 @@ int main()
   }
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
+  if (g_orbis_startup_intro.load()) // shelf v3 (AI-assisted): the opening's towers rise from the play time
+    orbis_shelf3_intro_card(s_base_si);
 #ifdef PS5SX2_ACHIEVEMENTS
   OrbisAchievementsConfigure(s_base_si);
 #endif
@@ -5393,6 +5599,30 @@ int main()
 
   VMBootParameters params;
   params.filename = s_game_path; // vk-285-30
+  if (g_orbis_startup_intro.load())
+    params.fast_boot = false; // P2-24: the BIOS's whole startup
+  // shelf v3 (AI-assisted): the game page picked a save state to start from (logs/shelf-state.txt: the game's path, then the state's).
+  {
+    const std::string note = OrbisLogPath("shelf-state.txt");
+    if (FILE *f = fopen(note.c_str(), "r"))
+    {
+      char game[1024] = {}, state[1024] = {};
+      const bool ok = fgets(game, sizeof(game), f) && fgets(state, sizeof(state), f);
+      fclose(f);
+      unlink(note.c_str()); // once
+      game[strcspn(game, "\r\n")] = 0;
+      state[strcspn(state, "\r\n")] = 0;
+      struct stat st = {};
+      if (ok && !s_game_path.empty() && s_game_path == game && stat(state, &st) == 0 && st.st_size > 0)
+      {
+        params.save_state = state;
+        printf("[shelf3] starting from the save state %s\n", state);
+      }
+      else
+        printf("[shelf3] the shelf's save state note is for another start: ignored\n");
+      fflush(stdout);
+    }
+  }
   // vk-285-139: a game's discs (and the cheat disc as disc 1 when the game starts from it).
   if (!s_game_path.empty() && !(s_game_path.size() > 4 && strcasecmp(s_game_path.c_str() + s_game_path.size() - 4, ".elf") == 0))
   {
@@ -5618,7 +5848,7 @@ int main()
       snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyOpenBiosCantStart), s_own_bios_dir_shown.c_str());
       sys_notify(msg);
       fflush(stdout);
-      if (frontend_ran || s_game_tile_started)
+      if (frontend_ran || s_game_tile_started || g_orbis_startup_intro.load())
         orbis_restart_to_menu();
       orbis_exit_quietly(1);
     }
@@ -5649,7 +5879,7 @@ int main()
       snprintf(how, sizeof(how), fe::Tr(fe::Str::HowNative), api);
     char msg[512];
     snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyNowPlaying), title.c_str(), how);
-    sys_notify(msg);
+    sys_notify_info(msg);
   }
   else
   {
@@ -5687,7 +5917,7 @@ int main()
     // display) would choose the same image again, and fail again, in a loop.
     // 2.12: and a game tile's game (also not picked on the shelf): the shelf opens (in the main app through the relaunch payload, else in the tile). open-shelf.txt is
     // written before the leave, so the next start does not start the tile's game again: no loop.
-    if (frontend_ran || s_game_tile_started)
+    if (frontend_ran || s_game_tile_started || g_orbis_startup_intro.load())
       orbis_restart_to_menu();
     orbis_exit_quietly(1);
   }
@@ -6038,7 +6268,7 @@ int main()
 
   printf("[boot] smoke test window done - keeping emulator running\n");
   fflush(stdout);
-  sys_notify(fe::Tr(fe::Str::NotifyStopped));
+  sys_notify_info(fe::Tr(fe::Str::NotifyStopped));
   ps5::debug::set_line(2, "GAME RUNNING");
   ps5::debug::set_line(3, "keep-alive (no shutdown)");
   // Keep the VM running: VMManager::Shutdown would stop the emulation.

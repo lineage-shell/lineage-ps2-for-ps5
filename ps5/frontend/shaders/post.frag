@@ -43,5 +43,23 @@ void main()
 		float lumaB = luma(rgbB);
 		result = (lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB;
 	}
+	// P2-19e: the soft focus behind the sheets' words (texel.w 0 sharp .. 1 soft): the scene holds only the field there (the
+	// words are drawn after this pass), so it all goes softly out of focus, as on the PS2. Twelve taps on two rings, ~4 px at
+	// 1080 lines at full strength; uniform per frame, so the branch costs nothing when off.
+	if (pc.texel.w > 0.001)
+	{
+		float r = pc.texel.w * 4.0 * (1.0 / pc.texel.y) / 1080.0;
+		vec3 acc = rgbM * 0.10;
+		// shelf v3 (AI-assisted): a third ring, so the wider blur (texel.w up to 3: the PS2 menus' five passes) stays smooth.
+		for (int i = 0; i < 6; i++)
+		{
+			float a = float(i) * 1.0472;
+			vec2 o = vec2(cos(a), sin(a));
+			acc += texture(u_scene, v_uv + o * r * t).rgb * 0.05;
+			acc += texture(u_scene, v_uv + vec2(-o.y, o.x) * 0.5 * r * t).rgb * 0.055;
+			acc += texture(u_scene, v_uv + vec2(o.x * 0.866 - o.y * 0.5, o.x * 0.5 + o.y * 0.866) * 0.75 * r * t).rgb * 0.045;
+		}
+		result = mix(result, acc, min(1.0, pc.texel.w * 1.5));
+	}
 	o_color = vec4(result * pc.texel.z, 1.0);
 }

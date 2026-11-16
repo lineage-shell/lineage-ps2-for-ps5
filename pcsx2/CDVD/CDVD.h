@@ -163,6 +163,8 @@ struct cdvdStruct
 };
 
 extern cdvdStruct cdvd;
+// The drive's disc key, as N-command CdReadKey reads it (CDVD.cpp; PS5 port 2026-11-16: also used by R5900.cpp's PS2 logo boot).
+extern void cdvdReadKey(u8 arg0, u16 arg1, u32 arg2, u8* key);
 
 extern void cdvdReadLanguageParams(u8* config);
 

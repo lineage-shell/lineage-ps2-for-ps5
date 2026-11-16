@@ -44,15 +44,16 @@ struct HaloDraw
 	float radius = 0.04f, line = 0.012f, glow_width = 0.08f;
 };
 
+// ps2-console-shelf (AI-assisted): what shaders/bg.frag takes (its push constants, in this order): the PS2 fog.
 struct BgParams
 {
-	float glow_color[4];
-	float glow_pos[4];
-	float floor_glow[4];
-	float top[4];
-	float mid[4];
-	float bottom[4];
-	float misc[4];
+	float glow_color[4]; // rgb, strength: the white bloom behind the selection
+	float glow_pos[4];   // x, y (0..1), radius x, radius y (of the height)
+	float glow2[4];      // x, y (0..1), radius, strength: a bluish bloom (the disc)
+	float fog_lo[4];     // the fog's dark colour; w: how much of the Browser's lit grey field
+	float fog_hi[4];     // the fog's light colour; w: how much it gathers in the middle
+	float motes[4];      // the motes' colour; w: their strength
+	float misc[4];       // aspect, top-left corner light, vignette, time
 };
 
 // Texture changes within the UI vertex stream (AI-assisted).
@@ -76,11 +77,23 @@ struct FrameDesc
 	std::vector<UiVertex> ui;
 	std::vector<UiImageRange> ui_images;
 	float fade = 1.0f;
+	// P2-19e: the first `ui_scene` UI vertices (a screen's 3D field: the sheets' rods and cubes) are drawn into the scene, under the
+	// post pass, which can soften them (`blur` 0 sharp .. 1 soft, ~4 px at 1080 lines); the rest (the words) stay sharp over it.
+	uint32_t ui_scene = 0;
+	float blur = 0.0f;
+	uint32_t ui_under = 0; // shelf v3 (AI-assisted): the first ui_under UI vertices are drawn in the scene under the cases (<= ui_scene)
+	// shelf v3 (AI-assisted): the PS2 opening's afterimage. ui[0, ghost_end) is the layer fed back (the towers): drawn, then the buffer of the
+	// frames before blended over it at 80/128, then fed again (half width). ghost_reset starts the buffer black. 0 = none.
+	uint32_t ghost_end = 0;
+	bool ghost_reset = false;
 };
 
 class Renderer
 {
 public:
+	// shelf v3 (kurolume, 2026-11-16): the cases' plastic, black (the default) or the blue many PAL PS2 games came in.
+	void SetCaseBlue(bool blue) { m_case_blue = blue; }
+	bool m_case_blue = false;
 	// `out_images`: the display images (the swapchain's, or offscreen images on a PC), in
 	// `out_format`, `width` x `height`; they end each frame in `out_final_layout`.
 	bool Init(Vk* vk, VkPhysicalDevice physical_device, VkDevice device, uint32_t queue_family, VkQueue queue,
@@ -112,6 +125,9 @@ public:
 	void WaitIdle();
 	const std::string& error() const { return m_error; }
 
+	// shelf v3 (AI-assisted): the scene image (the frame's 3D pass, before the post pass) as a texture set for the final pass's UI: what
+	// the PS2's glass refracts.
+	VkDescriptorSet SceneSet() const { return m_post_set; }
 	uint32_t width() const { return m_width; }
 	uint32_t height() const { return m_height; }
 
@@ -174,6 +190,14 @@ private:
 	VkFramebuffer m_scene_fb = VK_NULL_HANDLE;
 	VkRenderPass m_scene_pass = VK_NULL_HANDLE;
 	VkRenderPass m_final_pass = VK_NULL_HANDLE;
+	// shelf v3 (AI-assisted): the PS2 opening's afterimage (boot.md 2.3): a half-width buffer fed with the towers each frame and blended
+	// back at 80/128 under the next frame's.
+	VkRenderPass m_ghost_load_pass = VK_NULL_HANDLE;
+	Texture m_ghost_g, m_ghost_t, m_ghost_depth;
+	VkFramebuffer m_ghost_g_fb = VK_NULL_HANDLE, m_ghost_t_fb = VK_NULL_HANDLE;
+	VkDescriptorSet m_ghost_g_set = VK_NULL_HANDLE, m_ghost_t_set = VK_NULL_HANDLE;
+	bool m_ghost_valid = false;
+	bool EnsureGhost();
 
 	VkDescriptorSetLayout m_set0_layout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_set1_layout = VK_NULL_HANDLE;
@@ -187,6 +211,7 @@ private:
 	VkPipeline m_halo = VK_NULL_HANDLE;
 	VkPipeline m_post = VK_NULL_HANDLE;
 	VkPipeline m_ui = VK_NULL_HANDLE;
+	VkPipeline m_ui_scene = VK_NULL_HANDLE; // P2-19e: the UI pipeline in the scene pass (the field under the soft focus)
 
 	Buffer m_box_vb, m_box_ib;
 	Buffer m_quad_vb; // the full-screen triangle, then the halo's six corners

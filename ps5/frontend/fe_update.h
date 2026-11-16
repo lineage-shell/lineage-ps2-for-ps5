@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "../coreorbis/orbis-shims/OrbisAppId.h" // ps2-console-shelf: the fork's title ID
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -40,7 +41,7 @@ constexpr uint64_t kUpdateMaxZipBytes = 512ull << 20; // the installer's MAX_ZIP
 // installer-dl (AI-assisted; a tester who copied only eboot.bin: "it said it did not have the elf file"): System update fetches the installer from
 // the same release when the app has none (OrbisInstallerStart.cpp FindInstaller: /app0, then the app's folder), and puts it in the app's folder.
 constexpr const char* kInstallerAssetName = "PS5SX2Installer.elf";
-constexpr const char* kInstallerDest = "/data/homebrew/PPSA99203/PS5SX2Installer.elf";
+constexpr const char* kInstallerDest = PS5SX2_APP_DIR "/PS5SX2Installer.elf";
 constexpr uint64_t kInstallerMaxBytes = 64ull << 20; // what OrbisInstallerStart.cpp reads of one
 
 struct ReleaseInfo

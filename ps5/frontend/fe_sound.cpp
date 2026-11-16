@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 
 namespace fe
 {
@@ -298,6 +300,23 @@ const std::vector<float>* SoundBank::Pick(Sfx sfx)
 		last = i;
 		return &set[static_cast<size_t>(i)];
 	};
+	// ps2-console-shelf: a console sound read from its file wins. Move and MoveRepeat share move.wav, Launch is select.wav,
+	// L1/R1's jumps are page.wav, the end of the shelf is error.wav.
+	{
+		Sfx file = sfx;
+		switch (sfx)
+		{
+			case Sfx::MoveRepeat: file = Sfx::Move; break;
+			case Sfx::Launch: file = Sfx::Select; break;
+			case Sfx::JumpLeft:
+			case Sfx::JumpRight: file = Sfx::Page; break;
+			case Sfx::Edge: file = Sfx::Error; break;
+			default: break;
+		}
+		const std::vector<float>& f = m_file[static_cast<int>(file)];
+		if (!f.empty())
+			return &f;
+	}
 	switch (sfx)
 	{
 		case Sfx::Move: return pick(m_move, m_last_move);
@@ -306,14 +325,166 @@ const std::vector<float>* SoundBank::Pick(Sfx sfx)
 		case Sfx::JumpRight: return &m_jump_right;
 		case Sfx::Edge: return &m_edge;
 		case Sfx::Launch: return &m_launch;
+		// ps2-console-shelf: the console sounds without their file fall back to the nearest key sound (or stay silent).
+		case Sfx::Select: return pick(m_move, m_last_move);
+		case Sfx::Back: return pick(m_repeat, m_last_repeat);
+		case Sfx::Error: return &m_edge;
+		case Sfx::Open: return pick(m_move, m_last_move);
+		case Sfx::Close: return pick(m_repeat, m_last_repeat);
+		case Sfx::Page: return &m_jump_right;
+		case Sfx::Done: return &m_launch;
+		case Sfx::Startup:
+		case Sfx::Disc: return nullptr;
 	}
 	return nullptr;
+}
+
+
+namespace
+{
+uint32_t Le32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24); }
+uint16_t Le16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
+} // namespace
+
+bool SoundBank::ReadWav(const std::string& path, std::vector<float>& out, std::string& why, double max_seconds)
+{
+	out.clear();
+	FILE* f = std::fopen(path.c_str(), "rb");
+	if (!f)
+	{
+		why = "missing";
+		return false;
+	}
+	std::vector<uint8_t> d;
+	{
+		uint8_t buf[65536];
+		size_t n;
+		while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+		{
+			d.insert(d.end(), buf, buf + n);
+			if (d.size() > (64u << 20))
+				break;
+		}
+		std::fclose(f);
+	}
+	if (d.size() < 12 || std::memcmp(d.data(), "RIFF", 4) || std::memcmp(d.data() + 8, "WAVE", 4))
+	{
+		why = "not a RIFF/WAVE file";
+		return false;
+	}
+	int format = 0, channels = 0, bits = 0;
+	uint32_t rate = 0;
+	const uint8_t* pcm = nullptr;
+	size_t pcm_bytes = 0;
+	for (size_t at = 12; at + 8 <= d.size();)
+	{
+		const uint32_t size = Le32(d.data() + at + 4);
+		const uint8_t* body = d.data() + at + 8;
+		const size_t have = std::min<size_t>(size, d.size() - at - 8);
+		if (!std::memcmp(d.data() + at, "fmt ", 4) && have >= 16)
+		{
+			format = Le16(body);
+			channels = Le16(body + 2);
+			rate = Le32(body + 4);
+			bits = Le16(body + 14);
+			if (format == 0xFFFE && have >= 26) // WAVE_FORMAT_EXTENSIBLE: the sub-format's first two bytes
+				format = Le16(body + 24);
+		}
+		else if (!std::memcmp(d.data() + at, "data", 4))
+		{
+			pcm = body;
+			pcm_bytes = have;
+		}
+		at += 8 + static_cast<size_t>(size) + (size & 1);
+	}
+	if (format != 1 || bits != 16 || (channels != 1 && channels != 2))
+	{
+		why = "not 16-bit PCM mono/stereo (format " + std::to_string(format) + ", " + std::to_string(bits) + " bits, " + std::to_string(channels) +
+			" channels)";
+		return false;
+	}
+	if (rate != 22050 && rate != 44100 && rate != 48000 && rate != 32000 && rate != 24000 && rate != 16000)
+	{
+		why = "sample rate " + std::to_string(rate) + " not supported";
+		return false;
+	}
+	if (!pcm || pcm_bytes < static_cast<size_t>(channels) * 2)
+	{
+		why = "no samples";
+		return false;
+	}
+	size_t frames = pcm_bytes / (static_cast<size_t>(channels) * 2);
+	frames = std::min(frames, static_cast<size_t>(max_seconds * rate));
+	// Trailing silence (below about -66 dB) is cut: it would only hold a voice.
+	auto sample = [&](size_t i, int c) { return static_cast<int16_t>(Le16(pcm + (i * static_cast<size_t>(channels) + static_cast<size_t>(c)) * 2)); };
+	while (frames > 1)
+	{
+		const int16_t l = sample(frames - 1, 0), r = sample(frames - 1, channels - 1);
+		if (std::abs(l) > 16 || std::abs(r) > 16)
+			break;
+		frames--;
+	}
+	// Linear resampling to kRate (the files are short UI sounds: good enough, and it is done once at start).
+	const double step = static_cast<double>(rate) / kRate;
+	const size_t out_frames = static_cast<size_t>(static_cast<double>(frames) / step);
+	out.resize(out_frames * 2);
+	for (size_t i = 0; i < out_frames; i++)
+	{
+		const double src = static_cast<double>(i) * step;
+		const size_t i0 = static_cast<size_t>(src);
+		const size_t i1 = std::min(i0 + 1, frames - 1);
+		const float t = static_cast<float>(src - static_cast<double>(i0));
+		for (int c = 0; c < 2; c++)
+		{
+			const int ch = channels == 2 ? c : 0;
+			const float a = sample(i0, ch) / 32768.0f, b = sample(i1, ch) / 32768.0f;
+			out[2 * i + static_cast<size_t>(c)] = a + (b - a) * t;
+		}
+	}
+	return !out.empty();
+}
+
+int SoundBank::LoadDir(const std::string& dir)
+{
+	static const char* const kNames[kSfxCount] = {
+		"move", nullptr, nullptr, nullptr, nullptr, nullptr, // Move (and MoveRepeat), then the key sounds that borrow another file
+		"select", "back", "error", "open", "close", "page", "startup", "disc", "done"};
+	static_assert(static_cast<int>(Sfx::Select) == 6, "kNames follows Sfx");
+	int loaded = 0;
+	for (int i = 0; i < kSfxCount; i++)
+	{
+		if (!kNames[i])
+			continue;
+		std::string why;
+		const std::string path = dir + "/" + kNames[i] + ".wav";
+		if (ReadWav(path, m_file[i], why))
+		{
+			for (float& v : m_file[i])
+				v *= 0.8f; // a little under full scale, like the key sounds' headroom
+			loaded++;
+		}
+		else if (why != "missing")
+			std::printf("[frontend] sound: %s skipped: %s\n", path.c_str(), why.c_str());
+	}
+	std::string why;
+	if (ReadWav(dir + "/ambient.wav", m_ambient, why, 120.0))
+		loaded++;
+	else if (why != "missing")
+		std::printf("[frontend] sound: %s/ambient.wav skipped: %s\n", dir.c_str(), why.c_str());
+	std::printf("[frontend] sound: %d console sounds from %s%s\n", loaded, dir.c_str(), m_ambient.empty() ? "" : " (with the ambient drone)");
+	return loaded;
+}
+
+void Mixer::SetAmbient(bool on)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_ambient_on = on;
 }
 
 void Mixer::Play(Sfx sfx, float pan)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	const std::vector<float>* clip = m_bank.Pick(sfx);
+	const std::vector<float>* clip = m_override[static_cast<int>(sfx)] ? m_override[static_cast<int>(sfx)] : m_bank.Pick(sfx); // shelf v3
 	if (!clip || clip->empty())
 		return;
 	pan = std::max(-1.0f, std::min(1.0f, pan));
@@ -327,7 +498,67 @@ void Mixer::Play(Sfx sfx, float pan)
 	m_voices.push_back(v);
 }
 
+// shelf v3 (AI-assisted): a clip of the caller's (a BIOS sound effect), centred.
+void Mixer::PlayClip(const std::vector<float>* clip)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (!clip || clip->empty())
+		return;
+	Voice v;
+	v.clip = clip;
+	v.pos = 0;
+	v.gl = v.gr = m_volume;
+	if (m_voices.size() >= kMaxVoices)
+		m_voices.erase(m_voices.begin());
+	m_voices.push_back(v);
+}
+
+void Mixer::OverrideSfx(Sfx sfx, const std::vector<float>* clip)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_override[static_cast<int>(sfx)] = clip;
+}
+
+void Mixer::SetStream(std::function<void(float* out, int frames)> fn)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_stream = std::move(fn);
+}
+
 void Mixer::Mix(float* out, int frames)
+{
+	if (m_out_rate == kNative)
+	{
+		MixNative(out, frames);
+		return;
+	}
+	// Another device rate: the native mix, linearly converted (pos steps kNative / m_out_rate native frames an output frame).
+	const double step = static_cast<double>(kNative) / m_out_rate;
+	for (int i = 0; i < frames; i++)
+	{
+		size_t i0 = static_cast<size_t>(m_rs_pos);
+		while (i0 + 1 >= m_rs.size() / 2)
+		{
+			// Keep the last frame, add 256 new native frames.
+			std::vector<float> keep;
+			if (m_rs.size() >= 2)
+				keep.assign(m_rs.end() - 2, m_rs.end()), m_rs_pos -= static_cast<double>(m_rs.size() / 2 - 1);
+			else
+				m_rs_pos = 0;
+			m_rs = keep;
+			const size_t base = m_rs.size();
+			m_rs.resize(base + 512);
+			MixNative(m_rs.data() + base, 256);
+			i0 = static_cast<size_t>(m_rs_pos);
+		}
+		const float t = static_cast<float>(m_rs_pos - static_cast<double>(i0));
+		out[2 * i] = m_rs[2 * i0] + (m_rs[2 * i0 + 2] - m_rs[2 * i0]) * t;
+		out[2 * i + 1] = m_rs[2 * i0 + 1] + (m_rs[2 * i0 + 3] - m_rs[2 * i0 + 1]) * t;
+		m_rs_pos += step;
+	}
+}
+
+void Mixer::MixNative(float* out, int frames)
 {
 	std::fill(out, out + frames * 2, 0.0f);
 	{
@@ -345,6 +576,28 @@ void Mixer::Mix(float* out, int frames)
 		}
 		m_voices.erase(std::remove_if(m_voices.begin(), m_voices.end(), [](const Voice& v) { return v.pos >= v.clip->size(); }),
 			m_voices.end());
+		// ps2-console-shelf: the ambient drone, looped, quiet, with a slow fade (about a second) in and out.
+		const std::vector<float>& amb = m_bank.Ambient();
+		if (!amb.empty() && (m_ambient_on || m_ambient_gain > 0.0f))
+		{
+			constexpr float kAmbientLevel = 0.30f;
+			const float target = m_ambient_on ? kAmbientLevel * m_volume : 0.0f;
+			const float rate = kAmbientLevel / static_cast<float>(SoundBank::kRate); // full level in about one second
+			for (int i = 0; i < frames; i++)
+			{
+				if (m_ambient_gain < target)
+					m_ambient_gain = std::min(target, m_ambient_gain + rate);
+				else if (m_ambient_gain > target)
+					m_ambient_gain = std::max(target, m_ambient_gain - rate);
+				if (m_ambient_pos + 1 >= amb.size())
+					m_ambient_pos = 0;
+				out[2 * i] += amb[m_ambient_pos] * m_ambient_gain;
+				out[2 * i + 1] += amb[m_ambient_pos + 1] * m_ambient_gain;
+				m_ambient_pos += 2;
+			}
+		}
+		if (m_stream) // shelf v3: the menu's music
+			m_stream(out, frames);
 	}
 	// Several voices at once can add up: bend anything past 0.8 smoothly towards 1.
 	for (int i = 0; i < frames * 2; i++)
@@ -358,6 +611,6 @@ void Mixer::Mix(float* out, int frames)
 bool Mixer::Idle()
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	return m_voices.empty();
+	return m_voices.empty() && !m_stream; // shelf v3: not while the menu's music is set
 }
 } // namespace fe

@@ -112,6 +112,7 @@ public:
 		SystemUpdate, // 180: the sheet for all games: look for and install a newer PS5SX2 (the app's: fe_update.h)
 		LogUpload,    // 180: the sheet for all games: the session logs sent or not (the app's: fe_update.h)
 		ReloadTile,   // b185: the sheet for all games: the helper's "Reload PS2 Disc" tile on the home screen or not (the app's: AppConfig::reload_tile_on)
+		WebSettings,  // P2-16: the sheet for all games: the web settings page's QR code, full screen (the app's; it was a Home item)
 	};
 
 	enum class From
@@ -150,6 +151,8 @@ public:
 	void SetUpdateRows(bool on) { m_update_rows = on; }
 	// b185: the sheet for all games gets the "Reload PS2 Disc tile" switch when the app can set the helper's flag for it.
 	void SetReloadTileRow(bool on) { m_reload_tile_row = on; }
+	// P2-16: the sheet for all games gets the "Web Settings" row (the QR code page; it left Home, as the PS2's main menu has two items).
+	void SetWebSettingsRow(bool on) { m_web_settings_row = on; }
 	// 2.31 (AI-assisted): the in-game menu (fe_ingame.h) lists these groups after the others ("Shelf", "Discs"): a running game wants
 	// Display first. Empty (the shelf's sheet): OptionGroups()' order.
 	void SetGroupsLast(std::vector<std::string> titles) { m_groups_last = std::move(titles); }
@@ -241,6 +244,7 @@ private:
 	bool m_folder_rows = false; // vk-285-135
 	bool m_update_rows = false; // 180
 	bool m_reload_tile_row = false; // b185
+	bool m_web_settings_row = false; // P2-16
 	std::vector<std::string> m_groups_last; // 2.31
 	Kind m_folder_request = Kind::Header;
 	bool m_elf = false; // 2026-10-08: this sheet's game is an ELF (the Disc image row)

@@ -359,6 +359,8 @@ const GROUPS = [
   { title: "Shelf", global: true, items: [
     { key: "PS5SX2/ShowHiddenGames", label: "Show hidden games", type: "toggle", def: "false", short: "Hidden games %",
       hint: "Puts the games hidden from the shelf back on it, dimmed, so you can open one and turn Hide from the shelf off. Set here, it applies the next time the shelf opens." },
+    { key: "PS5SX2/StartupAnimation", label: "Startup animation", type: "toggle", def: "true", short: "Startup %",
+      hint: "On: when PS5SX2 starts, your PS2 BIOS plays its own startup, then Home opens. Any button skips it. Needs a BIOS of your own (not OpenPS2BIOS). Read at each start." },
   ]},
   // vk-285-139: games start from the cheat disc (a GameShark: picked under it, all games), the game's own discs after it.
   { title: "Discs", items: [
@@ -492,10 +494,10 @@ const GROUPS = [
   // vk-285-116 (AI-assisted): the Controls tab: the remapping, (vk-285-117) the save and load combos and their hold time
   // (main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h), the sticks, rumble, the keyboard and mouse.
   { title: "Buttons", tab: "controls",
-    hint: "Save and load: hold the two buttons together (slot 1). L3 + R3 is both sticks pressed in; Touchpad left or right is a finger on that side. Fast forward (experimental, for skipping videos): hold its two buttons to speed the game up, and again for full speed; Nothing on both turns it off. Change disc: hold its two buttons for the game's next disc (\"(Disc 2)\" beside it, or an .m3u list); any image goes in from the Disc section while you play. Settings page: hold its two buttons for 2 seconds to open this page in the PS5's browser (default: L2 + D-pad down). Below: what each button presses in games (Light press: the other buttons press at half strength, for Metal Gear Solid 2 and 3). Touchpad left and right click: clicking the touchpad on that half; default is Nothing (pick any PS2 button). When a side has a button, a click there presses only that one, not the touchpad click's. PS5SX2's own combos always use the real buttons.",
+    hint: "Save and load: hold the two buttons together (slot 1). L3 + R3 is both sticks pressed in; Touchpad left or right is a finger on that side. Fast forward (experimental, for skipping videos): hold its two buttons to speed the game up, and again for full speed; Nothing on both turns it off. Change disc: hold its two buttons for the game's next disc (\"(Disc 2)\" beside it, or an .m3u list); any image goes in from the Disc section while you play. Settings page: hold its two buttons for 2 seconds to open this page in the PS5's browser (default: both sticks, L3 + R3; save, load, change disc and quit are in that menu). Below: what each button presses in games (Light press: the other buttons press at half strength, for Metal Gear Solid 2 and 3). Touchpad left and right click: clicking the touchpad on that half; default is Nothing (pick any PS2 button). When a side has a button, a click there presses only that one, not the touchpad click's. PS5SX2's own combos always use the real buttons.",
     items: [
-    combo("SaveButton1", "Save: button 1", "L3R3", "Save state"), combo("SaveButton2", "Save: button 2", "Up"),
-    combo("LoadButton1", "Load: button 1", "L3R3", "Load state"), combo("LoadButton2", "Load: button 2", "Down"),
+    combo("SaveButton1", "Save: button 1", "None", "Save state"), combo("SaveButton2", "Save: button 2", "None"),
+    combo("LoadButton1", "Load: button 1", "None", "Load state"), combo("LoadButton2", "Load: button 2", "None"),
     { key: "PS5SX2/StateHold", label: "Hold time", type: "seg", def: "0", cols: 6,
       options: [["0","Instant"],["0.5","0.5 s"],["1","1 s"],["1.5","1.5 s"],["2","2 s"],["3","3 s"]],
       hint: "How long the save or load buttons are held before it happens. Instant: as soon as both are down, and that last press doesn't reach the game. A second or two stops saving or loading by accident." },
@@ -503,8 +505,8 @@ const GROUPS = [
     { key: "PS5SX2/FastSpeed", label: "Fast forward speed", type: "seg", def: "0", cols: 4,
       options: [["0","Max"],["2","2x"],["3","3x"],["4","4x"]],
       hint: "How fast fast forward runs. Max: as fast as the console can. Some games' videos skip only at Max." },
-    combo("DiscButton1", "Change disc: button 1", "L3R3", "Change disc"), combo("DiscButton2", "Change disc: button 2", "Right"),
-    combo("WebButton1", "In-game menu: button 1", "L2", "In-game menu"), combo("WebButton2", "In-game menu: button 2", "Down"),
+    combo("DiscButton1", "Change disc: button 1", "None", "Change disc"), combo("DiscButton2", "Change disc: button 2", "None"),
+    combo("WebButton1", "In-game menu: button 1", "L3R3", "In-game menu"), combo("WebButton2", "In-game menu: button 2", "L3R3"),
     button("Cross", "Cross", "Cross"), button("Circle", "Circle", "Circle"), button("Square", "Square", "Square"),
     button("Triangle", "Triangle", "Triangle"), button("L1", "L1", "L1"), button("R1", "R1", "R1"), button("L2", "L2", "L2"),
     button("R2", "R2", "R2"), button("L3", "L3", "L3"), button("R3", "R3", "R3"), button("Options", "Options", "Start"),
@@ -1079,7 +1081,7 @@ function memcardsHtml(isGlobal) {
     let opts = '<option value=""' + (cur === "" ? " selected" : "") + ">" + esc(inherited) + "</option>" +
       '<option value="@none"' + (cur === "@none" ? " selected" : "") + ">No card</option>";
     for (const c of cards.cards)
-      opts += '<option value="' + esc(c.name) + '"' + (c.name === cur ? " selected" : "") + ">" + esc(c.name) + " \u00b7 " + cardSize(c.bytes) + "</option>";
+      opts += '<option value="' + esc(c.name) + '"' + (c.name === cur ? " selected" : "") + ">" + esc(c.name) + " \u00b7 " + (c.folder ? "folder card" : cardSize(c.bytes)) + "</option>";
     if (cur && cur !== "@none" && !listed)
       opts += '<option value="' + esc(cur) + '" selected>' + esc(cur) + " \u00b7 not in memcards/</option>";
     html += '<div class="row"><div class="head"><div class="label">Slot ' + s.n + '</div><div class="from">' + from + "</div></div>" +

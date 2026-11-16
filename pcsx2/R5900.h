@@ -299,6 +299,10 @@ extern u32 g_eeloadMain, g_eeloadExec;
 
 extern void eeloadHook();
 extern void eeloadHook2();
+// PS5 port (2026-11-16, AI-assisted): a fast boot of a PS2 disc goes through the BIOS's own rom0:PS2LOGO (the "PlayStation 2"
+// logo screen, read from the disc) instead of straight to the game, as a real PS2's OSDSYS launches it. Set by the PS5 boot code
+// (gs.ini PS5SX2/BootLogo); false (PCSX2's own fast boot) elsewhere. See eeloadHook().
+extern bool g_ps2logo_boot;
 
 // --------------------------------------------------------------------------------------
 //  R5900cpu

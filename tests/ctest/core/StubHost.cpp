@@ -261,10 +261,12 @@ void OrbisEEProfStart(); // vk-285-8 (the port's orbis_eeprof.cpp): once, on thi
 void OrbisWidescreenTick(); // vk-285-12 (pcsx2/OrbisWidescreen.cpp)
 #endif
 void OrbisKbdMousePump(); // vk-285-72 (the port's ProsperoKbdMouse.cpp)
+void OrbisStartupIntroTick(); // P2-24 (main-boot.cpp): the BIOS's startup played: back to the shelf
 void Host::PumpMessagesOnCPUThread()
 {
 	OrbisCpuSample(0); // eerec-285: EE thread
 	OrbisKbdMousePump(); // vk-285-72: the PS5's USB keyboard and mouse into the PS2's USB HID devices
+	OrbisStartupIntroTick();
 #ifdef ORBIS_VULKAN
 	OrbisEEProfStart();
 	OrbisWidescreenTick();

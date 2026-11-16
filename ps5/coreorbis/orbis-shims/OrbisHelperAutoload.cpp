@@ -2,6 +2,7 @@
 // console's ELF loader (127.0.0.1:9021) at start, so the user does not load it by hand. Every step goes to boot.log.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "OrbisAppId.h" // ps2-console-shelf: the fork's title ID
 #include "OrbisHelperAutoload.h"
 #include "ProsperoNotify.h" // 187: OrbisNotifyPlain (TellRestartOnce)
 
@@ -99,8 +100,10 @@ std::string FindElf()
 	static const char* const kPaths[] = {
 		"/app0/PS5SXHelper.elf",
 		"/app0/PS5SXHelper-merged-nomount.elf",
-		"/data/homebrew/PPSA99203/PS5SXHelper.elf",
-		"/data/homebrew/PPSA99203/PS5SXHelper-merged-nomount.elf",
+		PS5SX2_APP_DIR "/PS5SXHelper.elf",
+		PS5SX2_APP_DIR "/PS5SXHelper-merged-nomount.elf",
+		PS5SX2_UPSTREAM_APP_DIR "/PS5SXHelper.elf", // ps2-console-shelf: the live app's helper, when the fork ships none
+		PS5SX2_UPSTREAM_APP_DIR "/PS5SXHelper-merged-nomount.elf",
 		"/data/PCSX2/PS5SXHelper-merged-nomount.elf",
 		"/data/PCSX2/PS5SXHelper.elf",
 	};

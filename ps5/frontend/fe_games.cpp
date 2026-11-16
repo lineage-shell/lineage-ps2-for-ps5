@@ -2341,37 +2341,61 @@ int DiscNumber(const std::string& name, std::string* rest)
 {
 	std::string stem = name;
 	const size_t dot = stem.rfind('.');
-	if (dot != std::string::npos && dot > 0)
+	if (dot != std::string::npos && dot > 0 && stem.size() - dot <= 5)
 		stem.erase(dot);
 	const std::string low = Lower(stem);
-	int n = 0;
-	size_t at = std::string::npos, end = 0;
-	for (size_t p = low.find("(disc"); p != std::string::npos; p = low.find("(disc", p + 1))
-	{
-		size_t q = p + 5;
-		while (q < low.size() && low[q] == ' ')
-			q++;
-		size_t d = q;
+	auto digits = [&](size_t q, size_t& d) {
+		d = q;
 		while (d < low.size() && std::isdigit(static_cast<unsigned char>(low[d])))
 			d++;
-		if (d == q || d - q > 2)
+		return d > q && d - q <= 2;
+	};
+	int n = 0;
+	size_t at = std::string::npos, end = 0;
+	// "(Disc N)", "(Disc N of M)", "[Disc N]", "(CD N)", "[CD2]" (any case; Redump's naming and the common others).
+	for (size_t p = 0; p < low.size() && at == std::string::npos; p++)
+	{
+		if (low[p] != '(' && low[p] != '[')
+			continue;
+		const char close = low[p] == '(' ? ')' : ']';
+		size_t q = p + 1;
+		if (low.compare(q, 4, "disc") == 0)
+			q += 4;
+		else if (low.compare(q, 2, "cd") == 0)
+			q += 2;
+		else
+			continue;
+		while (q < low.size() && low[q] == ' ')
+			q++;
+		size_t d;
+		if (!digits(q, d))
 			continue;
 		size_t e = d;
 		if (low.compare(e, 4, " of ") == 0)
 		{
-			e += 4;
-			const size_t m = e;
-			while (e < low.size() && std::isdigit(static_cast<unsigned char>(low[e])))
-				e++;
-			if (e == m)
+			size_t m;
+			if (!digits(e + 4, m))
 				continue;
+			e = m;
 		}
-		if (e >= low.size() || low[e] != ')')
+		if (e >= low.size() || low[e] != close)
 			continue;
-		n = std::atoi(low.c_str() + q);
-		at = p;
-		end = e + 1;
-		break;
+		n = std::atoi(low.c_str() + q), at = p, end = e + 1;
+	}
+	// A bare " CD1" / " CD 2" / " Disc 2" word (then the end or a bracket).
+	for (const char* word : {" cd", " disc"})
+	{
+		const size_t wl = std::strlen(word);
+		for (size_t p = low.find(word); p != std::string::npos && at == std::string::npos; p = low.find(word, p + 1))
+		{
+			size_t q = p + wl;
+			while (q < low.size() && low[q] == ' ')
+				q++;
+			size_t d;
+			if (!digits(q, d) || (d < low.size() && low[d] != ' ' && low[d] != '(' && low[d] != '['))
+				continue;
+			n = std::atoi(low.c_str() + q), at = p, end = d;
+		}
 	}
 	if (rest)
 	{
@@ -2383,6 +2407,44 @@ int DiscNumber(const std::string& name, std::string* rest)
 		*rest = Trim(out);
 	}
 	return n;
+}
+
+// shelf v3 (AI-assisted): a title without its disc tag ("Devil May Cry 2 (Disc 1)" / "... CD1" -> "Devil May Cry 2").
+std::string WithoutDiscTag(const std::string& title)
+{
+	std::string key;
+	if (DiscNumber(title + ".x", &key) == 0)
+		return title;
+	// DiscNumber gives the rest lower-cased: cut the same span out of the original instead.
+	const std::string low = Lower(title);
+	std::string out = title;
+	for (const char* pat : {"(disc", "[disc", "(cd", "[cd", " disc", " cd"})
+	{
+		const size_t p = low.find(pat);
+		if (p == std::string::npos)
+			continue;
+		size_t e = p + std::strlen(pat);
+		const char close = pat[0] == '(' ? ')' : pat[0] == '[' ? ']' : 0;
+		if (close)
+			e = low.find(close, e) == std::string::npos ? low.size() : low.find(close, e) + 1;
+		else
+		{
+			while (e < low.size() && low[e] == ' ')
+				e++;
+			while (e < low.size() && std::isdigit(static_cast<unsigned char>(low[e])))
+				e++;
+		}
+		out = title.substr(0, p) + title.substr(e);
+		break;
+	}
+	std::string clean;
+	for (char c : out)
+		if (!(c == ' ' && !clean.empty() && clean.back() == ' '))
+			clean += c;
+	clean = Trim(clean);
+	while (!clean.empty() && (clean.back() == '-' || clean.back() == ' '))
+		clean.pop_back();
+	return clean.empty() ? title : clean;
 }
 
 std::vector<std::string> DiscSet(const std::string& path)

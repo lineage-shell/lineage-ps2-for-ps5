@@ -23,6 +23,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "OrbisAppId.h" // ps2-console-shelf: the fork's title ID
+
 namespace orbis_leave
 {
 // 176: the one place that says whether the main app leaves by the old exec (instant, no home screen) when neither flag is there. true = the old exec (the
@@ -104,7 +106,7 @@ constexpr int SettleMs(const char* text)
 // 23:37:18 (its own exec), no new process; the disc tile pressed 43 s later took the note (fresh for 3 minutes) and opened the shelf; closed and pressed
 // again 11 s later, it started the disc. Any start within 3 minutes took a note that was left for another title. Now a start takes only the note
 // addressed to it (NoteIsFor): a tile press after a leave of the main app, or of another tile, starts its game.
-constexpr const char* kMainTitle = "PPSA99203";
+constexpr const char* kMainTitle = PS5SX2_TITLE_ID;
 constexpr int kTitleMax = 16;
 
 struct ShelfMark
@@ -257,3 +259,4 @@ constexpr How FallBackTo(const In& in)
 	return Decide(next);
 }
 } // namespace orbis_leave
+

@@ -3,6 +3,7 @@
 // user loads neither the helper nor the installer by hand any more. Every step goes to boot.log.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "OrbisAppId.h" // ps2-console-shelf: the fork's title ID
 #include "OrbisHelperAutoload.h"
 #include "OrbisInstallerLaunch.h"
 
@@ -47,7 +48,7 @@ bool Exists(const std::string& path)
 // after it (all 51 vk-285-180 reports: "logger: skip (no installer shipped with the app)", though the package has PPSA99203/PS5SX2Installer.elf).
 std::string FindInstaller()
 {
-	static const char* const kPaths[] = {"/app0/PS5SX2Installer.elf", "/data/homebrew/PPSA99203/PS5SX2Installer.elf", "/data/PCSX2/PS5SX2Installer.elf"};
+	static const char* const kPaths[] = {"/app0/PS5SX2Installer.elf", PS5SX2_APP_DIR "/PS5SX2Installer.elf", "/data/PCSX2/PS5SX2Installer.elf"};
 	for (const char* p : kPaths)
 	{
 		struct stat s;
@@ -115,6 +116,12 @@ orbis_installer::StartResult Send(const std::string& path, const orbis_installer
 void OrbisLoggerAutoStart(const char* build_tag)
 {
 	using namespace orbis_installer;
+#if !PS5SX2_SELF_UPDATE
+	// ps2-console-shelf (AI-assisted): the fork sends no session logs upstream and never starts upstream's installer.
+	(void)build_tag;
+	Log("logger: off in this fork (" PS5SX2_TITLE_ID ")");
+	return;
+#endif
 	const bool flag = OrbisFlag && OrbisFlag("logger_noautoload");
 	const bool off = Exists(std::string(kWork) + "/no-log-upload");
 	const std::string elf = flag || off ? std::string() : FindInstaller();
@@ -141,6 +148,13 @@ bool OrbisInstallerPresent()
 
 orbis_installer::StartResult OrbisStartUpdateInstaller(const std::string& build_tag, const std::string& expect_tag, std::string& detail)
 {
+#if !PS5SX2_SELF_UPDATE
+	// ps2-console-shelf (AI-assisted): the fork cannot replace itself (or the live app) with an upstream release.
+	(void)build_tag;
+	(void)expect_tag;
+	detail = "self-update is off in this fork";
+	return orbis_installer::StartResult::NoInstaller;
+#endif
 	using namespace orbis_installer;
 	LaunchArgs a;
 	a.flags = kFlagRelaunch;

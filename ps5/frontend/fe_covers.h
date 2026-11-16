@@ -51,6 +51,7 @@ struct CoverImage
 	// 2.11: Back: painted with the note "No back cover for this game" (true: none can come) or without it (false: one may still arrive, the placeholder
 	// says nothing about it).
 	bool none = false;
+	bool front = false; // P2-17: Disc: no disc art was found, this is the game's front (the shelf prints it as the disc's label)
 };
 
 struct CoverConfig
@@ -264,6 +265,7 @@ private:
 	bool DownloadSpine(int index, CoverImage& out);   // 2.11
 	int NextSpineDownload() const;                    // m_mutex held
 	bool FindLocalDisc(const std::string& serial, CoverImage& out);
+	bool FindLocalFront(const std::string& serial, CoverImage& out); // P2-17: covers/ or cache/<serial>.jpg|png, for a disc with no disc art
 	bool WantsUpgrade(int index, const char* source) const;
 	bool UpgradeCover(int index, CoverImage& out);
 	bool WantsRevert(int index, const char* source) const; // 186: the same pass, the other way (launchbox_front_first false)

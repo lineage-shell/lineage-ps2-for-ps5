@@ -48,6 +48,7 @@ struct CardFile
 {
 	std::string name;
 	uint64_t bytes = 0;
+	bool folder = false; // a PCSX2 folder memory card (a directory holding _pcsx2_superblock; the core picks the kind by itself)
 };
 
 bool HasCardExtension(const std::string& name);

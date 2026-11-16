@@ -279,10 +279,10 @@ bool Renderer::CreateBoxMesh()
 					v.uv[0] = (p[2] + h[2]) / (2 * h[2]);
 					v.uv[1] = (h[1] - p[1]) / (2 * h[1]);
 				}
-				else
+				else // shelf v3: the edges: u across the thickness (back -Z .. front +Z), v along the edge (top to bottom, or spine to opening)
 				{
-					v.uv[0] = 0;
-					v.uv[1] = 0;
+					v.uv[0] = (p[2] + h[2]) / (2 * h[2]);
+					v.uv[1] = f.face_id == 3 ? (h[1] - p[1]) / (2 * h[1]) : (p[0] + h[0]) / (2 * h[0]);
 				}
 				v.face = f.face_id;
 				verts.push_back(v);
@@ -323,7 +323,8 @@ struct PipelineDesc
 	{
 		None,
 		Alpha,
-		Additive
+		Additive,
+		Premultiplied // shelf v3
 	} blend;
 	bool depth_test, depth_write;
 	VkRenderPass pass;
@@ -376,7 +377,14 @@ bool Renderer::CreatePipelines()
 			att.blendEnable = VK_TRUE;
 			att.colorBlendOp = VK_BLEND_OP_ADD;
 			att.alphaBlendOp = VK_BLEND_OP_ADD;
-			if (d.blend == PipelineDesc::Alpha)
+			if (d.blend == PipelineDesc::Premultiplied) // shelf v3: the UI (ui.frag premultiplies; alpha 0 is additive)
+			{
+				att.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+				att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+				att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+				att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+			}
+			else if (d.blend == PipelineDesc::Alpha)
 			{
 				att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
 				att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -449,7 +457,9 @@ bool Renderer::CreatePipelines()
 	const PipelineDesc post = {fe_spv_bg_vert, sizeof(fe_spv_bg_vert), fe_spv_post_frag, sizeof(fe_spv_post_frag),
 		&vec2_binding, 1, &vec2_attr, 1, PipelineDesc::None, false, false, m_final_pass};
 	const PipelineDesc ui = {fe_spv_ui_vert, sizeof(fe_spv_ui_vert), fe_spv_ui_frag, sizeof(fe_spv_ui_frag),
-		&ui_binding, 1, ui_attrs, 4, PipelineDesc::Alpha, false, false, m_final_pass};
+		&ui_binding, 1, ui_attrs, 4, PipelineDesc::Premultiplied, false, false, m_final_pass}; // shelf v3: premultiplied
+	const PipelineDesc ui_scene = {fe_spv_ui_vert, sizeof(fe_spv_ui_vert), fe_spv_ui_frag, sizeof(fe_spv_ui_frag),
+		&ui_binding, 1, ui_attrs, 4, PipelineDesc::Premultiplied, false, false, m_scene_pass}; // P2-19e; shelf v3: premultiplied
 	// 2.03: the six pipelines are made side by side, one thread each (about 70 ms apiece when made in turn: 430 ms of the shelf's 510 ms
 	// start). vkCreateGraphicsPipelines may be called from several threads when the pipeline cache is not shared (VK_NULL_HANDLE here).
 	struct Job
@@ -458,11 +468,12 @@ bool Renderer::CreatePipelines()
 		VkPipeline* out;
 		bool ok = false;
 	};
-	Job jobs[6] = {{&bg, &m_bg}, {&box, &m_box}, {&box_reflect, &m_box_reflect}, {&halo, &m_halo}, {&post, &m_post}, {&ui, &m_ui}};
+	Job jobs[7] = {{&bg, &m_bg}, {&box, &m_box}, {&box_reflect, &m_box_reflect}, {&halo, &m_halo}, {&post, &m_post}, {&ui, &m_ui},
+		{&ui_scene, &m_ui_scene}};
 	const auto t0 = std::chrono::steady_clock::now();
 	{
-		std::thread workers[5];
-		for (int i = 1; i < 6; i++)
+		std::thread workers[6];
+		for (int i = 1; i < 7; i++)
 			workers[i - 1] = std::thread([&make, &jobs, i]() { jobs[i].ok = make(*jobs[i].desc, *jobs[i].out); });
 		jobs[0].ok = make(*jobs[0].desc, *jobs[0].out);
 		for (std::thread& w : workers)
@@ -543,6 +554,57 @@ bool Renderer::Init(Vk* vk, VkPhysicalDevice physical_device, VkDevice device, u
 		r = m_vk->vkCreateRenderPass(m_dev, &rp, nullptr, &m_scene_pass);
 		if (r != VK_SUCCESS)
 			return Fail("vkCreateRenderPass (scene)", r);
+	}
+	// shelf v3 (AI-assisted): the same pass keeping the colour already there (the opening's afterimage buffer, drawn into again).
+	{
+		VkAttachmentDescription att[2] = {};
+		att[0].format = kSceneFormat;
+		att[0].samples = VK_SAMPLE_COUNT_1_BIT;
+		att[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		att[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		att[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		att[0].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		att[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		att[1].format = kDepthFormat;
+		att[1].samples = VK_SAMPLE_COUNT_1_BIT;
+		att[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		att[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		att[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		const VkAttachmentReference color_ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+		const VkAttachmentReference depth_ref = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+		VkSubpassDescription sub = {};
+		sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		sub.colorAttachmentCount = 1;
+		sub.pColorAttachments = &color_ref;
+		sub.pDepthStencilAttachment = &depth_ref;
+		VkSubpassDependency deps[2] = {};
+		deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+		deps[0].dstSubpass = 0;
+		deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+		                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		deps[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		deps[1].srcSubpass = 0;
+		deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+		deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		VkRenderPassCreateInfo rp = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+		rp.attachmentCount = 2;
+		rp.pAttachments = att;
+		rp.subpassCount = 1;
+		rp.pSubpasses = &sub;
+		rp.dependencyCount = 2;
+		rp.pDependencies = deps;
+		r = m_vk->vkCreateRenderPass(m_dev, &rp, nullptr, &m_ghost_load_pass);
+		if (r != VK_SUCCESS)
+			return Fail("vkCreateRenderPass (ghost)", r);
 	}
 	{
 		VkAttachmentDescription att = {};
@@ -790,6 +852,34 @@ Renderer::Slot& Renderer::RetireSlot()
 	return m_slots[(m_slot + kSlots - 1) % kSlots];
 }
 
+bool Renderer::EnsureGhost()
+{
+	if (m_ghost_g_fb)
+		return true;
+	const uint32_t w = std::max(1u, m_width / 2);
+	if (!CreateImage(w, m_height, kSceneFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, m_ghost_g) ||
+		!CreateImage(w, m_height, kSceneFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, m_ghost_t) ||
+		!CreateImage(w, m_height, kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, m_ghost_depth))
+		return false;
+	for (int k = 0; k < 2; k++)
+	{
+		const VkImageView views[2] = {k == 0 ? m_ghost_g.view : m_ghost_t.view, m_ghost_depth.view};
+		VkFramebufferCreateInfo fi = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+		fi.renderPass = m_scene_pass;
+		fi.attachmentCount = 2;
+		fi.pAttachments = views;
+		fi.width = w;
+		fi.height = m_height;
+		fi.layers = 1;
+		if (m_vk->vkCreateFramebuffer(m_dev, &fi, nullptr, k == 0 ? &m_ghost_g_fb : &m_ghost_t_fb) != VK_SUCCESS)
+			return false;
+	}
+	m_ghost_g_set = AllocTextureSet(&m_ghost_g, m_white, m_white);
+	m_ghost_t_set = AllocTextureSet(&m_ghost_t, m_white, m_white);
+	m_ghost_valid = false;
+	return m_ghost_g_set && m_ghost_t_set;
+}
+
 VkDescriptorSet Renderer::AllocTextureSet(Texture* t0, Texture* t1, Texture* t2, Texture* t3)
 {
 	VkDescriptorSet set = VK_NULL_HANDLE;
@@ -893,7 +983,28 @@ bool Renderer::Render(const FrameDesc& f, uint32_t out_index, VkSemaphore wait, 
 	std::memcpy(s.ubo.mapped, &ubo, sizeof(ubo));
 
 	// The UI's vertices.
-	const VkDeviceSize ui_bytes = f.ui.size() * sizeof(UiVertex);
+	// shelf v3: the afterimage's two full-screen quads go after the frame's UI (the buffer blended in at 80/128; the layer fed in at 48/128).
+	const bool ghost = f.ghost_end > 0 && f.ghost_end <= f.ui.size() && f.ui_under == 0 && EnsureGhost();
+	if (!ghost)
+		m_ghost_valid = false; // (a later afterimage starts from black, never from a stale buffer)
+	UiVertex gq[12];
+	if (ghost)
+	{
+		auto pack = [](float r, float g, float b, float a) {
+			auto c = [](float v) { return static_cast<uint32_t>(std::min(1.0f, std::max(0.0f, v)) * 255.0f + 0.5f); };
+			return c(r) | c(g) << 8 | c(b) << 16 | c(a) << 24;
+		};
+		const float W = static_cast<float>(m_width), H = static_cast<float>(m_height);
+		const uint32_t ca = pack(0.5f, 0.5f, 0.5f, 0.3125f), cb = pack(0.5f, 0.5f, 0.5f, 0.1875f); // (x2 in the shader: 80/128, 48/128)
+		const float xy[6][2] = {{0, 0}, {W, 0}, {W, H}, {0, 0}, {W, H}, {0, H}}, uv[6][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
+		for (int k = 0; k < 6; k++)
+		{
+			gq[k] = {xy[k][0], xy[k][1], uv[k][0], uv[k][1], ca, 0, 0, 0, 13.0f};
+			gq[6 + k] = {xy[k][0], xy[k][1], uv[k][0], uv[k][1], cb, 0, 0, 0, 13.0f};
+		}
+	}
+	const size_t ui_count = f.ui.size() + (ghost ? 12 : 0);
+	const VkDeviceSize ui_bytes = ui_count * sizeof(UiVertex);
 	if (ui_bytes > s.ui.size)
 	{
 		DestroyBuffer(s.ui);
@@ -901,7 +1012,11 @@ bool Renderer::Render(const FrameDesc& f, uint32_t out_index, VkSemaphore wait, 
 			return false;
 	}
 	if (ui_bytes)
-		std::memcpy(s.ui.mapped, f.ui.data(), static_cast<size_t>(ui_bytes));
+	{
+		std::memcpy(s.ui.mapped, f.ui.data(), f.ui.size() * sizeof(UiVertex));
+		if (ghost)
+			std::memcpy(static_cast<uint8_t*>(s.ui.mapped) + f.ui.size() * sizeof(UiVertex), gq, sizeof(gq));
+	}
 
 	VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -934,6 +1049,45 @@ bool Renderer::Render(const FrameDesc& f, uint32_t out_index, VkSemaphore wait, 
 	const VkRect2D scissor = {{0, 0}, {m_width, m_height}};
 	const VkDeviceSize zero = 0;
 	const VkDeviceSize halo_offset = 6 * sizeof(float);
+
+	// shelf v3 (AI-assisted): UI vertices drawn in the scene pass between first and end, switching to each ui_images range's texture.
+	auto draw_ui_range = [&](VkPipeline pipe, uint32_t first, uint32_t end) {
+		m_vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+		m_vk->vkCmdBindVertexBuffers(cmd, 0, 1, &s.ui.buffer, &zero);
+		for (const auto& image : f.ui_images)
+		{
+			if (image.first < first || image.first + image.count > end || !image.set)
+				continue;
+			m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &m_atlas_set, 0, nullptr);
+			if (image.first > first)
+				m_vk->vkCmdDraw(cmd, image.first - first, 1, first, 0);
+			m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &image.set, 0, nullptr);
+			m_vk->vkCmdDraw(cmd, image.count, 1, image.first, 0);
+			first = image.first + image.count;
+		}
+		m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &m_atlas_set, 0, nullptr);
+		if (first < end)
+			m_vk->vkCmdDraw(cmd, end - first, 1, first, 0);
+	};
+	// shelf v3: a fresh afterimage buffer starts black (as the BIOS's feedback buffer).
+	const uint32_t half_w = std::max(1u, m_width / 2);
+	const VkViewport half_viewport = {0, 0, static_cast<float>(half_w), static_cast<float>(m_height), 0, 1};
+	const VkRect2D half_scissor = {{0, 0}, {half_w, m_height}};
+	if (ghost && (f.ghost_reset || !m_ghost_valid))
+	{
+		VkClearValue clear[2] = {};
+		clear[0].color = {{0, 0, 0, 1}};
+		clear[1].depthStencil = {1.0f, 0};
+		VkRenderPassBeginInfo rb = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+		rb.renderPass = m_scene_pass;
+		rb.framebuffer = m_ghost_g_fb;
+		rb.renderArea = half_scissor;
+		rb.clearValueCount = 2;
+		rb.pClearValues = clear;
+		m_vk->vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+		m_vk->vkCmdEndRenderPass(cmd);
+		m_ghost_valid = true;
+	}
 
 	// The scene.
 	{
@@ -977,12 +1131,17 @@ bool Renderer::Render(const FrameDesc& f, uint32_t out_index, VkSemaphore wait, 
 				p.p1[0] = d.sheen_pos;
 				p.p1[1] = d.sheen_strength;
 				p.p1[2] = d.alpha;
+				p.p1[3] = m_case_blue ? 1.0f : 0.0f; // shelf v3: the cases' plastic colour
 				m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &d.set, 0, nullptr);
 				m_vk->vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 					sizeof(p), &p);
 				m_vk->vkCmdDrawIndexed(cmd, m_box_index_count, 1, 0, 0, 0);
 			}
 		};
+		// shelf v3: the first ui_under UI vertices (a screen's background) go under the cases.
+		const uint32_t under = std::min<uint32_t>(std::min(f.ui_under, f.ui_scene), static_cast<uint32_t>(f.ui.size()));
+		if (under > 0 && m_atlas_set)
+			draw_ui_range(m_ui_scene, 0, under);
 		draw_boxes(f.reflections, true);
 		draw_boxes(f.boxes, false);
 
@@ -1005,6 +1164,54 @@ bool Renderer::Render(const FrameDesc& f, uint32_t out_index, VkSemaphore wait, 
 			m_vk->vkCmdBindVertexBuffers(cmd, 0, 1, &m_quad_vb.buffer, &halo_offset);
 			m_vk->vkCmdDraw(cmd, 6, 1, 0, 0);
 		}
+		// P2-19e: the screen's 3D field (the first ui_scene UI vertices), into the scene so the post pass can soften it.
+		// shelf v3: vertices [ui_under, ui_scene) after the cases, with their textures (ui_images) as the final pass draws them.
+		const uint32_t field = std::min<uint32_t>(f.ui_scene, static_cast<uint32_t>(f.ui.size()));
+		if (ghost && m_atlas_set)
+		{
+			// The afterimage (boot.md 2.3): the fed-back layer, then the buffer of the frames before over it at 80/128, then the rest.
+			const uint32_t gend = std::min(f.ghost_end, field);
+			draw_ui_range(m_ui_scene, 0, gend);
+			m_vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ui_scene);
+			m_vk->vkCmdBindVertexBuffers(cmd, 0, 1, &s.ui.buffer, &zero);
+			m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &m_ghost_g_set, 0, nullptr);
+			m_vk->vkCmdDraw(cmd, 6, 1, static_cast<uint32_t>(f.ui.size()), 0);
+			if (field > gend)
+				draw_ui_range(m_ui_scene, gend, field);
+		}
+		else if (field > under && m_atlas_set)
+			draw_ui_range(m_ui_scene, under, field);
+		m_vk->vkCmdEndRenderPass(cmd);
+	}
+	if (ghost && m_atlas_set)
+	{
+		// The feed (2.3 step 4, linear so done in two steps): the layer alone at half width, then into the buffer at 48/128 (the
+		// buffer keeps 80/128 of itself): buffer = 0.375 layer + 0.625 buffer = the frame's draw buffer shrunk, as the BIOS's copy.
+		VkClearValue clear[2] = {};
+		clear[0].color = {{0, 0, 0, 1}};
+		clear[1].depthStencil = {1.0f, 0};
+		VkRenderPassBeginInfo rb = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+		rb.renderPass = m_scene_pass;
+		rb.framebuffer = m_ghost_t_fb;
+		rb.renderArea = half_scissor;
+		rb.clearValueCount = 2;
+		rb.pClearValues = clear;
+		m_vk->vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+		m_vk->vkCmdSetViewport(cmd, 0, 1, &half_viewport);
+		m_vk->vkCmdSetScissor(cmd, 0, 1, &half_scissor);
+		m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &s.frame_set, 0, nullptr);
+		draw_ui_range(m_ui_scene, 0, std::min<uint32_t>(f.ghost_end, static_cast<uint32_t>(f.ui.size())));
+		m_vk->vkCmdEndRenderPass(cmd);
+		rb.renderPass = m_ghost_load_pass;
+		rb.framebuffer = m_ghost_g_fb;
+		m_vk->vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+		m_vk->vkCmdSetViewport(cmd, 0, 1, &half_viewport);
+		m_vk->vkCmdSetScissor(cmd, 0, 1, &half_scissor);
+		m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &s.frame_set, 0, nullptr);
+		m_vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ui_scene);
+		m_vk->vkCmdBindVertexBuffers(cmd, 0, 1, &s.ui.buffer, &zero);
+		m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &m_ghost_t_set, 0, nullptr);
+		m_vk->vkCmdDraw(cmd, 6, 1, static_cast<uint32_t>(f.ui.size()) + 6, 0);
 		m_vk->vkCmdEndRenderPass(cmd);
 	}
 
@@ -1020,7 +1227,7 @@ bool Renderer::Render(const FrameDesc& f, uint32_t out_index, VkSemaphore wait, 
 		m_vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_post);
 		m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &s.frame_set, 0, nullptr);
 		m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &m_post_set, 0, nullptr);
-		const float post[4] = {1.0f / m_width, 1.0f / m_height, f.fade, 0};
+		const float post[4] = {1.0f / m_width, 1.0f / m_height, f.fade, Clamp(f.blur, 0.0f, 3.0f)}; // P2-19e: w = the soft focus; shelf v3: up to 3 (the PS2 menus' five blur passes)
 		m_vk->vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 			sizeof(post), post);
 		m_vk->vkCmdBindVertexBuffers(cmd, 0, 1, &m_quad_vb.buffer, &zero);
@@ -1031,7 +1238,7 @@ bool Renderer::Render(const FrameDesc& f, uint32_t out_index, VkSemaphore wait, 
 			m_vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1, &m_atlas_set, 0, nullptr);
 			m_vk->vkCmdBindVertexBuffers(cmd, 0, 1, &s.ui.buffer, &zero);
 			// Preserve UI ordering when a badge temporarily replaces the font atlas. (AI-assisted)
-			uint32_t first = 0;
+			uint32_t first = std::min<uint32_t>(f.ui_scene, static_cast<uint32_t>(f.ui.size())); // P2-19e: the field was drawn in the scene
 			for (const auto& image : f.ui_images)
 			{
 				if (image.first < first || image.first + image.count > f.ui.size() || !image.set)
@@ -1141,7 +1348,7 @@ void Renderer::Shutdown()
 	DestroyBuffer(m_box_vb);
 	DestroyBuffer(m_box_ib);
 	DestroyBuffer(m_quad_vb);
-	for (VkPipeline* p : {&m_bg, &m_box, &m_box_reflect, &m_halo, &m_post, &m_ui})
+	for (VkPipeline* p : {&m_bg, &m_box, &m_box_reflect, &m_halo, &m_post, &m_ui, &m_ui_scene})
 		if (*p)
 		{
 			m_vk->vkDestroyPipeline(m_dev, *p, nullptr);
@@ -1165,6 +1372,15 @@ void Renderer::Shutdown()
 	m_out_views.clear();
 	if (m_scene_fb)
 		m_vk->vkDestroyFramebuffer(m_dev, m_scene_fb, nullptr);
+	if (m_ghost_g_fb)
+		m_vk->vkDestroyFramebuffer(m_dev, m_ghost_g_fb, nullptr);
+	if (m_ghost_t_fb)
+		m_vk->vkDestroyFramebuffer(m_dev, m_ghost_t_fb, nullptr);
+	DestroyImage(m_ghost_g);
+	DestroyImage(m_ghost_t);
+	DestroyImage(m_ghost_depth);
+	if (m_ghost_load_pass)
+		m_vk->vkDestroyRenderPass(m_dev, m_ghost_load_pass, nullptr);
 	DestroyImage(m_scene);
 	DestroyImage(m_depth);
 	if (m_scene_pass)

@@ -3,6 +3,7 @@
 // Ported from diagnostics/native-launch-probe-12-fixed/src/privilege_request.cpp
 // and privilege_io.cpp (PS2-Library-Prototype). Start/step/summary logic
 // unchanged; adds a bounded blocking driver for headless boot.
+#include "OrbisAppId.h" // ps2-console-shelf: the fork's title ID
 #include "ProsperoHenJailbreak.h"
 
 #include <cerrno>
@@ -200,7 +201,7 @@ void orbis_log_hen_config()
         buf[total < 0 ? 0 : total] = 0;
         bool has_id = false, has_enabled = false;
         for (ssize_t i = 0; i + 9 <= total; ++i) {
-            if (!__builtin_memcmp(buf + i, "PPSA99203", 9))
+            if (!__builtin_memcmp(buf + i, PS5SX2_TITLE_ID, 9))
                 has_id = true;
             if (!__builtin_memcmp(buf + i, "enabled", 7))
                 has_enabled = true;

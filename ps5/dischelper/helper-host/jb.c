@@ -119,6 +119,7 @@ typedef struct {
 int sceKernelSendNotificationRequest(int32_t device, void *request,
                                      size_t size, int32_t blocking);
 
+#ifndef HELPER_QUIET
 static void notify_jailbroken(void) {
   static jb_notify_request_t req;
   memset(&req, 0, sizeof(req));
@@ -128,6 +129,7 @@ static void notify_jailbroken(void) {
   memcpy(req.message, "Jailbroken!", sizeof("Jailbroken!") - 1);
   (void)sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
 }
+#endif
 
 static int jb_apply(pid_t pid) {
   static const uint8_t kFullCaps[16] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -201,7 +203,9 @@ static void check_slot(const char *name) {
     const pid_t pid = parse_pid(body);
     if (pid > 1 && jb_apply(pid)) {
       stepf("jailbroken pid=%d tid=%s (marker unlinked)", (int)pid, tid);
+#ifndef HELPER_QUIET
       notify_jailbroken();
+#endif
       unlink(path);
     } else {
       stepf("jb FAILED pid=%d tid=%s (marker unlinked)",

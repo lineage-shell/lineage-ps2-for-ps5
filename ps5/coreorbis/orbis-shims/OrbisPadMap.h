@@ -256,16 +256,18 @@ struct Config
 	uint8_t invert_left = 0;  // bit 0 up-down, bit 1 left-right
 	uint8_t invert_right = 0;
 	// vk-285-117: the save and load state combos (two buttons each) and how long they're held first.
-	ComboButton save[2] = {CB_L3R3, CB_UP};
-	ComboButton load[2] = {CB_L3R3, CB_DOWN};
+	// shelf v3 (kurolume, 2026-11-16): both sticks are the in-game menu's alone (save, load, change disc and quit are in it), so these
+	// combos are off unless set.
+	ComboButton save[2] = {CB_NONE, CB_NONE};
+	ComboButton load[2] = {CB_NONE, CB_NONE};
 	int hold_ms = 0;
 	// vk-285-118: the fast forward combo (PS5SX2/FastButton1/2, experimental, to skip videos): it turns fast forward on and
 	// off, after the same hold time. Nothing on both (the default): no combo.
 	ComboButton fast[2] = {CB_NONE, CB_NONE};
 	// vk-285-139: the change disc combo (PS5SX2/DiscButton1/2): the next disc of the game's set ("(Disc 2)" beside it).
-	ComboButton disc[2] = {CB_L3R3, CB_RIGHT};
+	ComboButton disc[2] = {CB_NONE, CB_NONE};
 	// the open-settings-page combo (PS5SX2/WebButton1/2): opens this game's settings page in the PS5's browser (2 s hold, fixed).
-	ComboButton web[2] = {CB_L2, CB_DOWN};
+	ComboButton web[2] = {CB_L3R3, CB_L3R3}; // shelf v3: both sticks open the in-game menu (as the PS1 app)
 
 	Config()
 	{

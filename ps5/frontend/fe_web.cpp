@@ -116,7 +116,7 @@ std::string CardsJson(const std::string& dir, const std::string& created)
 	bool first = true;
 	for (const CardFile& c : ListCards(dir))
 	{
-		out += std::string(first ? "" : ",") + "{\"name\":" + Json(c.name) + ",\"bytes\":" + std::to_string(c.bytes) + "}";
+		out += std::string(first ? "" : ",") + "{\"name\":" + Json(c.name) + ",\"bytes\":" + std::to_string(c.bytes) + (c.folder ? ",\"folder\":true" : "") + "}";
 		first = false;
 	}
 	out += "],\"sizes\":[8,16,32,64],\"defaults\":[\"Mcd001.ps2\",\"Mcd002.ps2\"]";

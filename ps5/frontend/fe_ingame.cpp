@@ -33,7 +33,8 @@ constexpr uint32_t kIconPlay = 0xF04B, kIconSave = 0xF0C7, kIconLoad = 0xF07C, k
 				   kIconPhone = 0xF3CD, kIconFlag = 0xF024, kIconHouse = 0xF015, kIconPause = 0xF04C, kIconTrophy = 0xF091,
 				   kIconLock = 0xF023;
 
-const float kHouse[3] = {0.55f, 0.42f, 1.0f};
+// ps2-console-shelf (AI-assisted): the PS2 system software's cyan instead of the violet, and its neutral greys.
+const float kHouse[3] = {0.25f, 0.68f, 0.95f};
 
 uint32_t Rgba(float r, float g, float b, float a = 1.0f)
 {
@@ -52,8 +53,8 @@ uint32_t Faded(uint32_t c, float f)
 	return (c & 0x00FFFFFFu) | (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24);
 }
 
-const uint32_t kHi = Rgba(1, 1, 1), kMid = Rgba(0.74f, 0.72f, 0.84f), kLo = Rgba(0.52f, 0.50f, 0.64f);
-const uint32_t kDim = Rgba(0.72f, 0.69f, 0.82f), kInk = Rgba(0.07f, 0.06f, 0.16f), kWarn = Rgba(1.0f, 0.62f, 0.60f);
+const uint32_t kHi = Rgba(0.925f, 0.933f, 0.957f), kMid = Rgba(0.73f, 0.74f, 0.78f), kLo = Rgba(0.55f, 0.56f, 0.60f);
+const uint32_t kDim = Rgba(0.70f, 0.71f, 0.75f), kInk = Rgba(0.02f, 0.03f, 0.08f), kWarn = Rgba(1.0f, 0.62f, 0.60f);
 const uint32_t kAmber = Rgba(1.0f, 0.77f, 0.45f), kGold = Rgba(1.0f, 0.82f, 0.40f);
 
 std::string Utf8(uint32_t cp)
@@ -953,7 +954,7 @@ void InGameMenu::Build(InGameFrame& out, float W, float H, const float frame[4])
 	const float e = EaseOut(m_open);
 
 	// The background: the paused picture, small and blurred, darkened towards the shelf's night (over the present's black).
-	Picture(out, static_cast<int>(InGameImage::Blur), 0, 0, W, H, 0, Rgba(0.40f, 0.37f, 0.52f, e));
+	Picture(out, static_cast<int>(InGameImage::Blur), 0, 0, W, H, 0, Rgba(0.30f, 0.34f, 0.52f, e)); // ps2-console-shelf: towards navy
 	RectV(out, 0, 0, W, H * 0.40f, 0, Rgba(0.01f, 0.01f, 0.03f, 0.50f * e), Rgba(0.01f, 0.01f, 0.03f, 0.0f));
 	RectV(out, 0, H * 0.55f, W, H * 0.45f, 0, Rgba(0.01f, 0.01f, 0.03f, 0.0f), Rgba(0.01f, 0.01f, 0.03f, 0.62f * e));
 	RectH(out, 0, 0, W * 0.30f, H, Rgba(0.01f, 0.01f, 0.03f, 0.40f * e), Rgba(0.01f, 0.01f, 0.03f, 0.0f));
@@ -966,8 +967,8 @@ void InGameMenu::Build(InGameFrame& out, float W, float H, const float frame[4])
 		const size_t begin = out.ui.size();
 		const Fonts& f = *m_cfg.fonts;
 		float x = kMargin * k;
-		x += Text(out, f, "PS5", x, 150.0f * k, 60.0f * k, kHi, 0.8f);
-		Text(out, f, "SX2", x + 2.0f * k, 150.0f * k, 60.0f * k, Mixed(0.3f), 0.8f);
+		(void)x;
+		Text(out, f, "PS5SX2", kMargin * k, 150.0f * k, 60.0f * k, kHi, 0.0f); // ps2-console-shelf: thin, like the shelf's header
 		const std::string clock = m_cfg.clock ? m_cfg.clock() : std::string();
 		if (!clock.empty())
 			Text(out, f, clock.c_str(), W - kMargin * k, 150.0f * k, 58.0f * k, kHi, 0.2f, Fonts::Right);
@@ -1009,8 +1010,8 @@ void InGameMenu::BuildLeft(InGameFrame& out, float W, float H, float k, const fl
 		return;
 	const size_t begin = out.ui.size();
 	const float bx = x0, base = y1 + 132 * k;
-	const std::string title = Fit(f, m_s.game.title.empty() ? std::string("PlayStation 2") : m_s.game.title, 78 * k, cw);
-	Text(out, f, title.c_str(), bx, base, 78 * k, kHi, 0.6f);
+	const std::string title = Fit(f, m_s.game.title.empty() ? std::string("PS2") : m_s.game.title, 78 * k, cw);
+	Text(out, f, title.c_str(), bx, base, 78 * k, Rgba(0.894f, 0.918f, 0.486f), 0.15f); // ps2-console-shelf: the title in the PS2's yellow, thin
 	std::string meta;
 	auto add = [&](const std::string& s) {
 		if (s.empty())
@@ -1340,7 +1341,7 @@ void InGameMenu::BuildQr(InGameFrame& out, float x, float y, float side, float k
 	const float mod = std::floor(side / static_cast<float>(n + 2 * quiet));
 	const float s = mod * static_cast<float>(n + 2 * quiet);
 	Rect(out, x, y, s, s, 14 * k, Rgba(0.86f, 0.85f, 0.90f));
-	const uint32_t ink = Rgba(0.07f, 0.06f, 0.16f);
+	const uint32_t ink = Rgba(0.02f, 0.03f, 0.08f);
 	const float grow = 0.4f;
 	for (int my = 0; my < n; my++)
 		for (int mx0 = 0; mx0 < n;)

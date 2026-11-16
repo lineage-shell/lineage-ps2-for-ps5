@@ -15,7 +15,9 @@ inline constexpr char request_path[] = "/download0/etahen_jailbreak";
 inline constexpr char staged_request_path[] = "/download0/etahen_jailbreak.tmp";
 // The HEN daemon removes the request before its per-process jailbreak is finished.
 // Keep a bounded post-consume grace period so we do not race credential checks.
-inline constexpr std::size_t max_polls = 600;
+// (shelf v3, AI-assisted: 48 polls = 0.8 s. A broker that is there answers at once (the helper: 1 poll, 29 ms); 600 polls (10 s) of black
+// screen at every start when none is loaded was the wait before the fallback.)
+inline constexpr std::size_t max_polls = 48;
 inline constexpr std::size_t post_consume_max_polls = 450;
 
 int process_id() noexcept;

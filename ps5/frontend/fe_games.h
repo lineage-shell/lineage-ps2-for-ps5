@@ -113,5 +113,6 @@ bool ShowHiddenGames(const std::string& gs_ini);
 std::vector<std::string> DiscSet(const std::string& path);
 // N of "(Disc N)" / "(Disc N of M)" in a file name (any case), 0 when there's none; `rest`: the name without it and its
 // extension, for comparing.
-int DiscNumber(const std::string& name, std::string* rest);
+int DiscNumber(const std::string& name, std::string* rest); // (shelf v3: also "[Disc N]", "(CD N)", a bare " CD1")
+std::string WithoutDiscTag(const std::string& title);
 } // namespace fe

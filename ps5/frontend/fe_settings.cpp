@@ -214,7 +214,16 @@ std::vector<CardFile> ListCards(const std::string& dir)
 		if (name.empty() || name[0] == '.' || !HasCardExtension(name) || !SafeValue(name))
 			continue;
 		struct stat st = {};
-		if (stat((dir + "/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode) || static_cast<uint64_t>(st.st_size) < kPs1CardBytes)
+		if (stat((dir + "/" + name).c_str(), &st) != 0)
+			continue;
+		if (S_ISDIR(st.st_mode))
+		{
+			struct stat sb = {};
+			if (stat((dir + "/" + name + "/_pcsx2_superblock").c_str(), &sb) == 0 && S_ISREG(sb.st_mode))
+				out.push_back({name, 0, true});
+			continue;
+		}
+		if (!S_ISREG(st.st_mode) || static_cast<uint64_t>(st.st_size) < kPs1CardBytes)
 			continue;
 		out.push_back({name, static_cast<uint64_t>(st.st_size)});
 	}

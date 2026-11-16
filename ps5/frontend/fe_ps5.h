@@ -152,6 +152,8 @@ extern "C" void orbis_event_log(const char* line);
 
 // 176 (main-boot.cpp): ms since "back to the menu" (L1 + R1 + Touch) was pressed, in the process that press started; -1 for any other start.
 long long orbis_leave_press_age_ms();
+// P2-24 (main-boot.cpp): this start follows the BIOS's own startup animation: the shelf opens on Home (no towers, no startup.wav).
+bool orbis_startup_intro_returned();
 
 // vk-285-110: the PS5's system language (system parameter 1: 0 Japanese, 1 English, 2 French, 3 Spanish,
 // ...; English when the call fails), read once.

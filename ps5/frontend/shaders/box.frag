@@ -61,8 +61,29 @@ void main()
 	}
 	else
 	{
-		base = vec3(0.020, 0.020, 0.025);
+		base = mix(vec3(0.020, 0.020, 0.025), vec3(0.125, 0.314, 0.702), pc.p1.w); // shelf v3: black, or the PAL blue (#2050B3, measured on a photo of the case)
 		gloss = 0.45;
+		// shelf v3 (kurolume, 2026-11-16): the seam where the case opens, a thin dark line round the three edges halfway through the thickness
+		// (the hinge side, the spine, has none), and on the opening edge the oval finger notch, drawn as a recess (dark inside, a lit lower lip).
+		float seam = 1.0 - 0.75 * (1.0 - smoothstep(0.007, 0.019, abs(v_uv.x - 0.5)));
+		base *= seam;
+		if (v_face == 3)
+		{
+			// The notch: a long slot with rounded ends, centred, 47% of the case's height (measured on a photo of an open case:
+			// both halves' edges are recessed over the middle 47%, meeting at the seam when it is closed), 60% of the thickness.
+			vec2 hs = vec2(0.30, 0.235);
+			vec2 q = vec2(v_uv.x - 0.5, v_uv.y - 0.5);
+			float rr = 0.06;
+			vec2 dq = abs(q) - (hs - vec2(rr));
+			float sd = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - rr; // < 0 inside the rounded slot
+			float inside = 1.0 - smoothstep(-0.006, 0.004, sd);
+			float rim = 1.0 - smoothstep(0.0, 0.012, abs(sd + 0.006));
+			// (Mid shade with a soft shadow just inside the edge all round, the same on both sides of the slot: the one-sided slope
+			// looked skewed on one side, kurolume round 4.)
+			float shade = 0.58 - 0.20 * smoothstep(-0.035, 0.0, sd);
+			base = mix(base, base * shade, inside);
+			base += rim * 0.32 * mix(vec3(0.12), vec3(0.22, 0.38, 0.70), pc.p1.w);
+		}
 	}
 
 	// Key light from the upper left, a weaker fill from the right, and some ambient.

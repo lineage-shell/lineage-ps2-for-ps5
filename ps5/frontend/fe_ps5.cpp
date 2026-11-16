@@ -7,6 +7,7 @@
 // Copyright (C) 2026 swordpdf
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../coreorbis/orbis-shims/OrbisAppId.h" // ps2-console-shelf: the fork's title ID
 #include "fe_ps5.h"
 
 #include "fe_app.h"
@@ -48,6 +49,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <iterator>
 #include <ctime>
 #include <dirent.h>
@@ -198,7 +200,7 @@ bool orbis_frontend_open_bios_image(const unsigned char** data, size_t* size, co
 	if (!s_looked)
 	{
 		s_looked = true;
-		static const char* const kDirs[] = {"/data/homebrew/PPSA99203/openps2bios", "/app0/openps2bios"};
+		static const char* const kDirs[] = {PS5SX2_APP_DIR "/openps2bios", "/app0/openps2bios"};
 		auto read_all = [](const std::string& path, std::vector<uint8_t>& out, size_t max) {
 			out.clear();
 			FILE* f = std::fopen(path.c_str(), "rb");
@@ -899,6 +901,19 @@ struct Display
 					display = d.display;
 					mode = m;
 				}
+			}
+			// shelf v3 (AI-assisted): the display's own resolution (1080p, 1440p or 4K as the TV runs), not the biggest mode: the shelf
+			// renders at native size. The biggest stays when no mode has the physical size.
+			{
+				const VkExtent2D phys = d.physicalResolution;
+				const VkDisplayModePropertiesKHR* own = nullptr;
+				for (const VkDisplayModePropertiesKHR& m : modes)
+					if (m.parameters.visibleRegion.width == phys.width && m.parameters.visibleRegion.height == phys.height &&
+						(!own || off_60hz(m) < off_60hz(*own)))
+						own = &m;
+				if (own && display == d.display)
+					mode = *own;
+				std::printf("[frontend] display: physical %ux%u, %s\n", phys.width, phys.height, own ? "using it" : "no such mode: the biggest");
 			}
 			if (display)
 				break;
@@ -2303,6 +2318,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	// fix180: "disc:<serial>" (main-boot.cpp writes it for a game started from a drive): a copy of that disc on the shelf is picked now; the drive's own
 	// entry, which the watcher reports a few seconds later, is picked when it comes (AppConfig::preselect_disc_serial)
 	const std::string last_disc = last.compare(0, 5, "disc:") == 0 ? last.substr(5) : std::string();
+	bool last_found = false; // P2-01: lastgame.txt names a game of the list (Home's Continue)
 	auto finish_scan = [&](std::vector<GameInfo>& out) {
 		out = scan.Take();
 		phase("games scanned");
@@ -2310,7 +2326,10 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 		int pick = 0;
 		for (size_t i = 0; i < out.size(); i++)
 			if (last_disc.empty() ? out[i].file == last : (!out[i].serial.empty() && out[i].serial == last_disc))
+			{
 				pick = static_cast<int>(i);
+				last_found = !last.empty();
+			}
 		return pick;
 	};
 	int preselect = 0;
@@ -2348,6 +2367,8 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 			const double s0 = Now();
 			mixer = new Mixer();
 			mixer->Build();
+			// ps2-console-shelf (AI-assisted): the PS2 console sounds the player put in /data/PCSX2/console-sounds (none ship with the app).
+			mixer->LoadDir(paths.top_dir + "/console-sounds");
 			audio = new AudioOut();
 			if (!audio->Start(mixer))
 			{
@@ -2471,7 +2492,34 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	acfg.build_label = paths.build_label;
 	acfg.test_note = paths.test_note; // vk-285-105
 	acfg.preselect = preselect;
+	acfg.last_played = last_found; // P2-01
 	acfg.preselect_disc_serial = last_disc; // fix180
+	// ps2-console-shelf (AI-assisted): back from a game with L1 + R1 + Touch (a fresh "back to the menu" note): the boot towers, built from
+	// PCSX2's play history (playtime.dat: the serial in 32 columns, then the seconds played).
+	{
+		const long long age = orbis_leave_press_age_ms();
+		acfg.returning = age >= 0 && age < 120000 && !orbis_startup_intro_returned();
+		acfg.after_bios_startup = orbis_startup_intro_returned(); // P2-24
+		if (acfg.returning)
+			if (FILE* f = std::fopen((paths.top_dir + "/playtime.dat").c_str(), "r"))
+			{
+				char line[256];
+				while (std::fgets(line, sizeof(line), f) && acfg.play_history.size() < 64)
+				{
+					if (std::strlen(line) < 34)
+						continue;
+					std::string serial(line, 32);
+					while (!serial.empty() && serial.back() == ' ')
+						serial.pop_back();
+					const unsigned long long secs = std::strtoull(line + 33, nullptr, 10);
+					if (!serial.empty() && secs > 0)
+						acfg.play_history.emplace_back(serial, static_cast<uint64_t>(secs));
+				}
+				std::fclose(f);
+			}
+		std::printf("[ps2] %s (%zu games in the play history)\n", acfg.returning ? "back from a game: the boot towers" : "fresh start: Home",
+			acfg.play_history.size());
+	}
 	acfg.sound = mixer;
 	// vk-285-114: the options sheet (Square) edits the files the settings page does, and logs as it does.
 	acfg.options.settings_dir = paths.settings_dir;
@@ -2617,7 +2665,8 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	// app ships (OrbisInstallerStart.cpp) and closes; Session logs writes the installer's no-log-upload switch. Not in a game tile's copy: the
 	// installer updates the main app. One look when the shelf opens (flags/noupdatecheck: none); a newer release is told in a notification.
 	Updater* updater = nullptr;
-	if (acfg.own_tile_game.empty())
+	// ps2-console-shelf (AI-assisted): no System update in the fork (OrbisAppId.h PS5SX2_SELF_UPDATE): it would install upstream's release.
+	if (PS5SX2_SELF_UPDATE && acfg.own_tile_game.empty())
 	{
 		static const char* const kWork = "/data/PS5SX2-Installer";
 		const std::string tag = build_tag ? build_tag : "";
@@ -2769,6 +2818,35 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	std::lock_guard<std::mutex> lock(g_launch_lock);
 	g_reask = true;
 	};
+	// shelf v3 (AI-assisted): Eject on the Browser's disc. MMC: PREVENT ALLOW MEDIUM REMOVAL (allow), then START STOP UNIT with LoEj
+	// (what the eject button does), through the drive's pass device as the speed commands go (OrbisDiscDrive). Untested on a console.
+	acfg.drive_eject = [](std::string& why) {
+		why = "no disc drive";
+		for (const std::string& dev : OrbisDiscDrive::List())
+		{
+			const int fd = open(dev.c_str(), O_RDONLY | O_NONBLOCK);
+			if (fd < 0)
+				continue;
+			const int pass = OrbisDiscDrive::OpenPassThrough(fd);
+			if (pass < 0)
+			{
+				close(fd);
+				why = "no pass-through device for " + dev;
+				continue;
+			}
+			OrbisDiscDrive::Command(pass, {0x1E, 0, 0, 0, 0, 0}, nullptr, 0, 5000);
+			orbis_mmc::Sense sense;
+			const bool ok = OrbisDiscDrive::Command(pass, {0x1B, 0, 0, 0, 0x02, 0}, nullptr, 0, 20000, &sense);
+			close(pass);
+			close(fd);
+			std::printf("[frontend] eject %s: %s\n", dev.c_str(), ok ? "done" : "refused");
+			std::fflush(stdout);
+			if (ok)
+				return true;
+			why = "the drive refused";
+		}
+		return false;
+	};
 	phase("app configured (sound, texture packs, online patches)");
 	bool ok = app.Init(&renderer, fonts, games, covers, acfg);
 	phase("app initialised");
@@ -2803,7 +2881,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	while (ok && !app.Done())
 	{
 		const double now = Now();
-		launch_path = TakeLaunchRequest();
+		launch_path = app.DiscSpinUpHolds() ? std::string() : TakeLaunchRequest(); // shelf v3: the disc spins up first
 		// bioscheck: a launch from outside the shelf starts only with a BIOS (App::OfferOutsideLaunch looks again); without one the
 		// shelf's BIOS question comes up for it, and picking the open BIOS lets it go (App::TakeApprovedLaunch, after the loop).
 		std::string refused;
@@ -2868,7 +2946,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 			scanning = false;
 			preselect = finish_scan(games);
 			covers->Start(games, fonts, cc, CoverGet);
-			app.SetGames(games, preselect);
+			app.SetGames(games, preselect, last_found);
 		}
 		st_start = Now();
 		app.Update(dt, in);
