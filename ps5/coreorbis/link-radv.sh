@@ -152,6 +152,31 @@ map="$OUT/build/radv-platform-local.map"
 } > "$map"
 radv_flags+=(--version-script "$map")
 
+# buildwork patch (not upstream): games on NFS shares (vk-285-135) came after this script's last update. link-vk.sh
+# passes --wrap for every name in orbis-shims/OrbisNfs.wrap; without them OrbisNfs.o's __real_* stay undefined, and
+# its __wrap_fflush/__wrap_fclose collide with the platform's (memstream.c). Chain them instead:
+#   fflush -> OrbisNfs __wrap_fflush -> (not an NFS FILE) platform memstream wrapper -> libc fflush.
+nfs_names=()
+while IFS= read -r name; do
+  [[ -z $name || $name == \#* ]] && continue
+  nfs_names+=("$name")
+  [[ $name == fflush || $name == fclose ]] || radv_flags+=("--wrap=$name")
+done < "$here/orbis-shims/OrbisNfs.wrap"
+chain="$OUT/build/nfs-chain"
+rm -rf "$chain"; mkdir -p "$chain"
+OBJCOPY=${OBJCOPY:-llvm-objcopy-18}
+cp "$RADV_PLATFORM" "$chain/libps5platform.a"
+"$OBJCOPY" --redefine-sym __wrap_fflush=ps5_memstream_fflush --redefine-sym __wrap_fclose=ps5_memstream_fclose \
+  "$chain/libps5platform.a"
+RADV_PLATFORM="$chain/libps5platform.a"
+nfs_obj="$here/obj-vk/shim/orbis-shims/OrbisNfs.o"
+OBJS=" $OBJS "
+[[ -f $nfs_obj && $OBJS == *" $nfs_obj "* ]] || { echo "[link-radv] error: $nfs_obj not in the link" >&2; exit 1; }
+"$OBJCOPY" --redefine-sym __real_fflush=ps5_memstream_fflush --redefine-sym __real_fclose=ps5_memstream_fclose \
+  "$nfs_obj" "$chain/OrbisNfs.o"
+OBJS=${OBJS/" $nfs_obj "/" $chain/OrbisNfs.o "}
+echo "[link-radv] NFS shares: ${#nfs_names[@]} C library calls wrapped, fflush/fclose chained to the platform's"
+
 # 4. The pie link (twice, as link-vk.sh: the second pass localizes everything but the imports). libunwind.a comes once more
 # before the system modules' stubs for _Unwind_Backtrace: the platform's backtrace() walks with it, and the console libc's
 # would mix two unwinders in one walk (RPCS3-PS5's link does the same; the RADV titles list libunwind before the stubs).

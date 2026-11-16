@@ -58,17 +58,22 @@ esac
 #                    byte the loader maps, the allocated sections and the import list are what the link gave; the build stops when they are not. The unstripped link
 #                    stays in the build folder as PS5SXHelper.unstripped.elf. STRIP=0 ships the unstripped link (symbols for a crash analysis).
 HELPER_LOGS=${HELPER_LOGS:-0}
+#   QUIET=1          (2026-11-16) no success notifications: no "Jailbroken!" popup (jb.c), no disc/game tile notes, no start-up or "starting" lines
+#                    (errors and a copy's progress still notify); PAYLOAD_REV "171p-q"; "-quiet" is added to the name and build folder.
+QUIET=${QUIET:-0}
 KP=${KP:-1}
 STRIP=${STRIP:-1}
-for sw in HELPER_LOGS KP STRIP; do case "${!sw}" in 0|1) ;; *) echo "$sw must be 0 or 1"; exit 1 ;; esac; done
+for sw in HELPER_LOGS KP STRIP QUIET; do case "${!sw}" in 0|1) ;; *) echo "$sw must be 0 or 1"; exit 1 ;; esac; done
 KPDEF=""
 SUF=""
 [ "$HELPER_LOGS" = 0 ] && KPDEF="-DKP_TEST_NOLOG=1"
 [ "$HELPER_LOGS" = 1 ] && SUF="$SUF-logs"
 [ "$KP" = 0 ] && SUF="$SUF-plain"
+QDEF=""
+[ "$QUIET" = 1 ] && SUF="$SUF-quiet" && QDEF="-DHELPER_QUIET=1"
 W=${W}${SUF}; OUT=${OUT%.elf}${SUF}.elf
 mkdir -p $W/obj && cd $W
-rm -f obj/main.o obj/mount.o obj/jb.o obj/disctile.o obj/tile.o obj/disc_launch.o obj/disc_hash.o obj/kp.o
+rm -f obj/main.o obj/mount.o obj/jb.o obj/disctile.o obj/tile.o obj/disc_launch.o obj/disc_speed8.o obj/disc_hash.o obj/kp.o
 sed 's/\r$//' "$HOST/$MAIN" > main.c
 for f in jb.c jb.h progress.h; do sed 's/\r$//' "$HOST/$f" > $f; done
 for f in mount.c mount.h; do sed 's/\r$//' "$HOST/$f" > $f; done   # kept in the folder for both variants; compiled for "normal" only
@@ -119,13 +124,13 @@ CXXF="-std=c++20 -O2 -DNDEBUG -fno-exceptions -fno-rtti @mb.rsp -I."
 for f in sgdb_art fe_https fe_https_ps5; do $CXX $CXXF -c $f.cpp -o obj/$f.o 2>&1 | grep -v 'no version information' | head -20; done
 $CC -std=gnu11 -O2 -w -c tile.c -o obj/tile.o 2>&1 | grep -v 'no version information' | head -20
 $CC -std=gnu11 -O2 -Wall -Wextra -Werror $KPDEF -c kp.c -o obj/kp.o 2>&1 | grep -v 'no version information' | head -40
-$CC -std=gnu11 -O2 -Wall -Wextra -Werror -DDISC_AUTO_EMBEDDED -c disc_launch.c -o obj/disc_launch.o 2>&1 | grep -v 'no version information' | head -40
+$CC -std=gnu11 -O2 -Wall -Wextra -Werror -DDISC_AUTO_EMBEDDED $QDEF -c disc_launch.c -o obj/disc_launch.o 2>&1 | grep -v 'no version information' | head -40
 $CC -std=gnu11 -O2 -Wall -Wextra -Werror -DDISC_AUTO_EMBEDDED -c disc_speed8.c -o obj/disc_speed8.o 2>&1 | grep -v 'no version information' | head -40 # 179: DiscSpeed8 SceShellCore 8x patch + 60 s drive pin
 $CC -std=gnu11 -O2 -Wall -Wextra -Werror -c disc_hash.c -o obj/disc_hash.o 2>&1 | grep -v 'no version information' | head -40
-$CC -std=gnu11 -O2 -Wall -Wextra -Werror -DDISC_MERGED -DDISC_HOST_THREAD $OWNS -I$SQLITE -c disctile.c -o obj/disctile.o 2>&1 | grep -v 'no version information' | head -40
+$CC -std=gnu11 -O2 -Wall -Wextra -Werror -DDISC_MERGED -DDISC_HOST_THREAD $OWNS $QDEF -I$SQLITE -c disctile.c -o obj/disctile.o 2>&1 | grep -v 'no version information' | head -40
 $CC -std=gnu11 -O2 -Wall -Wextra -Werror -c main.c -o obj/main.o 2>&1 | grep -v 'no version information' | head -40
 [ "$VARIANT" = normal ] && $CC -std=gnu11 -O2 -Wall -Wextra -Werror -c mount.c -o obj/mount.o 2>&1 | grep -v 'no version information' | head -40
-$CC -std=gnu11 -O2 -Wall -Wextra -Werror -c jb.c -o obj/jb.o 2>&1 | grep -v 'no version information' | head -40
+$CC -std=gnu11 -O2 -Wall -Wextra -Werror $QDEF -c jb.c -o obj/jb.o 2>&1 | grep -v 'no version information' | head -40
 rm -f PS5SXHelper.elf PS5SXHelper.unstripped.elf # a failed compile or link must not ship an ELF of an earlier build
 $CXX -o PS5SXHelper.elf obj/*.o -L$SQLITE -lsqlite3 -L$SDK/target/lib -lSceNet -lpthread 2>&1 | grep -v 'no version information' | head -30
 [ -f PS5SXHelper.elf ] || { echo "BUILD FAILED: no PS5SXHelper.elf was linked"; exit 1; }

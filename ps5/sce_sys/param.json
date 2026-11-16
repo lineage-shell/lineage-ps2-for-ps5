@@ -7,9 +7,9 @@
   "attribute": 0,
   "attribute2": 0,
   "attribute3": 524352,
-  "conceptId": "99203",
+  "conceptId": "99204",
   "contentBadgeType": 1,
-  "contentId": "UP9000-PPSA99203_00-PCSX2ORBIS00001",
+  "contentId": "UP9000-PPSA99204_00-PCSX2ORBIS00001",
   "contentVersion": "02.400.000",
   "downloadDataSize": 256,
   "gameIntent": {
@@ -22,7 +22,7 @@
   "localizedParameters": {
     "defaultLanguage": "en-US",
     "en-US": {
-      "titleName": "PS5SX2"
+      "titleName": "PlayStation 2"
     }
   },
   "masterVersion": "02.40",
@@ -33,6 +33,6 @@
   },
   "requiredSystemSoftwareVersion": "0x0000000000000000",
   "sdkVersion": "0x0000000000000000",
-  "titleId": "PPSA99203",
+  "titleId": "PPSA99204",
   "versionFileUri": ""
 }
