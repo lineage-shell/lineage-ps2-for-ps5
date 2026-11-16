@@ -1,5 +1,14 @@
 # PS5SX2: the PS5 layer
 
+> **Lineage Shell (PS2) is this fork of PS5SX2**: the shelf rebuilt to look like the PS2's own
+> system software (Home as the PS2 main menu, the Browser, the Memory Card-style Library, System Configuration sheets, the disc screen,
+> the boot towers on L1 + R1 + Touch), every screen full screen. It installs as **PPSA99204** next to the live PPSA99203
+> (`ps5/coreorbis/orbis-shims/OrbisAppId.h`) and shares `/data/PCSX2/`. System update and the session logger are compiled out
+> (`PS5SX2_SELF_UPDATE 0`), so it never installs an upstream release. UI sounds: PS2 console sounds the player puts in
+> `/data/PCSX2/console-sounds/` (move, select, back, error, open, close, page, startup, disc, done, ambient `.wav`); none ship with the
+> app. The PS2 look lives in `frontend/fe_ps2.*`, `frontend/fe_ps2ui_impl.h`, `frontend/shaders/bg.frag` and `ui.frag`; `frontend/host/fe_host
+> --home` previews it on a PC. Not made or endorsed by Sony; no Sony logos, BIOS, covers or audio are in this repository.
+
 PS5SX2 runs PCSX2 on a jailbroken PS5. Its renderer is PCSX2's Vulkan backend on a modified version of ps5vk, the Vulkan driver from [Mihawk-99](https://github.com/mihawk-99)'s [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan), tweaked specifically for PS5SX2 and linked into the app. It is developed on a PS5 Pro with firmware 11.40. The console runs the PS5SX2 Helper payload, which jailbreaks the app and mounts /data into its sandbox.
 
 ## Layout
