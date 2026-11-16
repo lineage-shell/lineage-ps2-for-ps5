@@ -48,11 +48,11 @@ PY
 }
 # The disc is listed first; the picked game stays picked; the disc is picked with Left, Cross asks the watcher again; Square opens the disc's own sheet
 # (gamedb, 2026-10-30: it opened the all-games one, and L1 there a sheet writing settings/.ini, which no start reads: #bugs "disc games ignore their
-# own settings"); its file is the one a start from the drive reads (fe_discsettings.h), R1 and L1 switch to all games and back.
+# own settings"); its file is the one a start from the drive reads (fe_discsettings.h); P2-20b: R1 and L1 no longer switch it to all games.
 run listed "game 2" "wait 1" "expect shelf=5" "expect selected=2" "expect driveentry=0" "drive SLUS-20312 Final Fantasy X" "wait 0.8" \
   "expect driveentry=1" "expect shelf=6" "expect selected=2" "press left 3" "wait 1" "expect selected=-2" "shot drive-entry" \
   "press square" "wait 0.8" "expect sheet=1" "expectsheetfile settings/Final Fantasy X (SLUS-20312).ini" "shot drive-sheet" \
-  "press r1" "wait 0.5" "expectsheetfile gs.ini" "press l1" "wait 0.5" "expectsheetfile settings/Final Fantasy X (SLUS-20312).ini" \
+  "press r1" "wait 0.5" "expectsheetfile settings/Final Fantasy X (SLUS-20312).ini" "press l1" "wait 0.5" "expectsheetfile settings/Final Fantasy X (SLUS-20312).ini" \
   "press circle" "wait 0.8" "expect sheet=0" "expect reasks=0" "press cross" "wait 0.3" "expect reasks=1" "shot drive-asked" \
   "press right" "wait 0.8" "expect selected=0" "drive off" "wait 0.8" "expect driveentry=0" "expect shelf=5" "expect selected=0"
 # gamedb (2026-10-30): a settings file an earlier build named (settings/<serial>.ini, 2.04 to 2.10) is the disc's, as at a start from the drive; a

@@ -20,6 +20,9 @@
 // --record-audio <out.wav>: the shelf's own sounds (fe_sound's key taps) for the frames recorded, 48 kHz stereo, in step
 // with --record's video; without --record nothing is drawn (a quick pass for a clip recorded before).
 //
+// laptop-preview: --window [--fullscreen] [--sounds <dir>] [--label <text>] [--disc "<serial>|<title>"] [--switch "<label>|<cmd>"] [--live "<s> <key>; ..."]:
+// after the steps, a live window (Vulkan swapchain through SDL3, keyboard, DualShock 4 / DualSense, sound) until it is closed; needs a build with
+// FE_HOST_WINDOW=1 (host_window.h). preview/preview.sh builds and starts it for any version of the shelf; F1 in the window lists the keys.
 // <folder> for --data is a stand-in for /data/PCSX2: settings/, gs.ini, patches/, memcards/ (made when missing).
 // Steps (from --script, one a line, and/or the command line, in that order):
 //   wait <s>               the shelf runs <s> seconds with no button down
@@ -63,6 +66,13 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <functional>
+#include <map>
+#include <new>
+
+#ifdef FE_HOST_WINDOW
+#include "host_window.h" // laptop-preview: --window
+#endif
 
 using namespace fe;
 
@@ -151,6 +161,12 @@ struct Gpu
 	VkQueue queue = VK_NULL_HANDLE;
 	std::vector<VkImage> images;
 	std::vector<VkDeviceMemory> memory;
+	// laptop-preview (--window): the window's instance extensions, its surface once the instance is there, whether a queue family can present to
+	// it; with `swapchain` the device gets VK_KHR_swapchain. All unset for the offscreen runs.
+	std::vector<const char*> instance_extensions;
+	std::function<bool(VkInstance, PFN_vkGetInstanceProcAddr)> after_instance;
+	std::function<bool(VkPhysicalDevice, uint32_t)> can_present;
+	bool swapchain = false;
 
 	bool Init(uint32_t w, uint32_t h)
 	{
@@ -166,8 +182,12 @@ struct Gpu
 		ai.apiVersion = VK_API_VERSION_1_1;
 		VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 		ici.pApplicationInfo = &ai;
+		ici.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
+		ici.ppEnabledExtensionNames = instance_extensions.data();
 		if (vk.vkCreateInstance(&ici, nullptr, &instance) != VK_SUCCESS || !vk.LoadInstance(instance, false, &missing))
 			return Fail("instance");
+		if (after_instance && !after_instance(instance, gipa))
+			return Fail("window surface");
 		uint32_t n = 1;
 		if (vk.vkEnumeratePhysicalDevices(instance, &n, &pd) < 0 || n == 0)
 			return Fail("no physical device (set VK_ICD_FILENAMES to SwiftShader's json)");
@@ -178,7 +198,7 @@ struct Gpu
 		vk.vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, nullptr);
 		std::vector<VkQueueFamilyProperties> qs(nq);
 		vk.vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qs.data());
-		for (qf = 0; qf < nq && !(qs[qf].queueFlags & VK_QUEUE_GRAPHICS_BIT); qf++)
+		for (qf = 0; qf < nq && !((qs[qf].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (!can_present || can_present(pd, qf))); qf++)
 			;
 		if (qf == nq)
 			return Fail("no graphics queue");
@@ -190,7 +210,13 @@ struct Gpu
 		VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 		dci.queueCreateInfoCount = 1;
 		dci.pQueueCreateInfos = &qci;
-		if (vk.vkCreateDevice(pd, &dci, nullptr, &device) != VK_SUCCESS || !vk.LoadDevice(device, false, &missing))
+		const char* swapchain_ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+		if (swapchain)
+		{
+			dci.enabledExtensionCount = 1;
+			dci.ppEnabledExtensionNames = &swapchain_ext;
+		}
+		if (vk.vkCreateDevice(pd, &dci, nullptr, &device) != VK_SUCCESS || !vk.LoadDevice(device, swapchain, &missing))
 			return Fail("device");
 		vk.vkGetDeviceQueue(device, qf, 0, &queue);
 
@@ -236,6 +262,23 @@ struct Gpu
 	}
 };
 
+// laptop-preview: the same fe_host.cpp builds on ps2-console-shelf (aafb081) and on any P2 set; P2-01 added AppConfig::last_played and
+// SetGames' third argument, so they are only used when there.
+template <class C>
+void SetLastPlayed(C& c, bool on)
+{
+	if constexpr (requires { c.last_played; })
+		c.last_played = on;
+}
+template <class A, class G>
+void SetGamesCompat(A& app, G games, int preselect, bool last)
+{
+	if constexpr (requires { app.SetGames(games, preselect, last); })
+		app.SetGames(std::move(games), preselect, last);
+	else
+		app.SetGames(std::move(games), preselect);
+}
+
 struct Step
 {
 	std::string op, arg, text;
@@ -279,6 +322,9 @@ bool ParseStep(const std::string& line, std::vector<Step>& out)
 	else if (st.op == "expect") // pr9n: "expect selected=4", "account=1", "sheet=0", "tab=2"; a mismatch fails the run (vk-285-137: "shelf=4"; 2.11: also "flip100>=95", "flip100<=12")
 		s >> st.arg;
 	else if (st.op == "flipreset") // 2.11: forget the fastest the case has turned so far ("expect flipspeed100<=270" is the fastest since the last one of these)
+	{
+	}
+	else if (st.op == "settings") // P2-20b: the settings for all games, as Home's System Configuration opens them (L1 / R1 no longer switch)
 	{
 	}
 	else if (st.op == "expectwhile") // R3: "expectwhile <condition> <must> [<must> ...]": frame by frame while the condition holds; the others must hold at every one of them
@@ -700,6 +746,7 @@ struct FakeHelper
 int main(int argc, char** argv)
 {
 	std::string data = "fe_host_data", out = "fe_host_shots", script, root;
+	bool returning = false, ask_disc = false, home = false; // ps2-console-shelf
 	uint32_t w = 1920, h = 1080;
 	int lang = 1; // English
 	bool achievements_preview = false;
@@ -730,6 +777,7 @@ int main(int argc, char** argv)
 	std::string gamedb_missing; // gamedb (2026-10-30)
 	bool open_bios = false;      // bioscheck
 	std::string bios_pending;    // bioscheck
+	int audio_rate = SoundBank::kRate;
 	std::string games_file, build_tag = "vk-285-114 (host)", record, record_audio; // 2026-10-08: the showcase video
 	std::string places; // 2026-10-08: --places "Label=/path|Label=/path": the folder picker's places (else the data folder's)
 	bool tiles = false; // 2.12: --tiles: the sheet's Home screen tile row, with the stand-in helper (FakeHelper) in <data>/tiles; --own-tile <path>: this run is a game tile's
@@ -742,6 +790,11 @@ int main(int argc, char** argv)
 	// b185: --reload-tile: the sheet for all games' "Reload PS2 Disc tile" switch, over <data>/flags/disctile_noreload (the helper's flag on the PS5).
 	bool reload_tile = false;
 	int record_fps = 30;
+	// laptop-preview: --window: a live window (keyboard, controller, sound) after the steps, until it is closed. --fullscreen starts it full
+	// screen; --sounds <dir>: the console sounds (else <data>/console-sounds); --label <text>: the version, in the title bar; --disc "<serial>|<title>":
+	// the PS2 disc the D key puts in the drive.
+	bool window = false, fullscreen = false;
+	std::string sounds_dir, label, disc_spec = "SLES-53777|Prince of Persia - The Two Thrones", live_spec, switch_spec;
 	for (int i = 1; i < argc; i++)
 	{
 		const std::string a = argv[i];
@@ -788,6 +841,12 @@ int main(int argc, char** argv)
 			bios_pending = next();
 		else if (a == "--games")
 			games_file = next();
+		else if (a == "--returning") // ps2-console-shelf
+			returning = true;
+		else if (a == "--home") // ps2-console-shelf: start on Home, as the console does (the older scripts start on the Library)
+			home = true;
+		else if (a == "--ask") // ps2-console-shelf
+			ask_disc = true;
 		else if (a == "--build-tag")
 			build_tag = next();
 		else if (a == "--record")
@@ -810,6 +869,20 @@ int main(int argc, char** argv)
 			record_audio = next();
 		else if (a == "--record-fps")
 			record_fps = std::atoi(next().c_str()) == 60 ? 60 : 30;
+		else if (a == "--window")
+			window = true;
+		else if (a == "--fullscreen")
+			window = fullscreen = true;
+		else if (a == "--sounds")
+			sounds_dir = next();
+		else if (a == "--label")
+			label = next();
+		else if (a == "--disc")
+			disc_spec = next();
+		else if (a == "--switch") // laptop-preview: "<label>|<shell command>": F2 closes this window and runs that (preview.sh: the other version)
+			switch_spec = next();
+		else if (a == "--live") // laptop-preview: "<s> <button>|<key>; ...": presses at those seconds of the window (a demo or a test of the window's flows)
+			live_spec = next();
 		else if (a == "--size")
 		{
 			const std::string s = next();
@@ -846,8 +919,33 @@ int main(int argc, char** argv)
 	SetGameDbFile(pcsx2 + "/bin/resources/GameIndex.yaml"); // 2026-10-08: the games' own hardware fixes (the Hardware fixes rows)
 
 	Gpu gpu;
+#ifdef FE_HOST_WINDOW
+	HostWindow hw;
+	if (window)
+	{
+		if (!hw.Open(1280, 720, fullscreen))
+			return 1;
+		gpu.instance_extensions = hw.InstanceExtensions();
+		gpu.after_instance = [&hw](VkInstance inst, PFN_vkGetInstanceProcAddr gipa) { return hw.CreateSurface(inst, gipa); };
+		gpu.can_present = [&hw](VkPhysicalDevice p, uint32_t family) { return hw.CanPresent(p, family); };
+		gpu.swapchain = true;
+	}
+#else
+	if (window)
+	{
+		std::fprintf(stderr, "[host] --window: this fe_host was built without it (FE_HOST_WINDOW=1 build-host.sh, needs SDL3)\n");
+		return 2;
+	}
+#endif
 	if (!gpu.Init(w, h))
 		return 1;
+#ifdef FE_HOST_WINDOW
+	if (window && !hw.Start(&gpu.vk, gpu.pd, gpu.device, gpu.qf, gpu.queue))
+	{
+		std::fprintf(stderr, "[host] the window's swapchain could not be made\n");
+		return 1;
+	}
+#endif
 	Fonts* fonts = new Fonts();
 	Renderer renderer;
 	if (!fonts->Init(text_font.data(), text_font.size(), icon_font.data(), icon_font.size(), brand_font.data(), brand_font.size()) ||
@@ -873,15 +971,22 @@ int main(int argc, char** argv)
 		{
 			if (line.empty() || line[0] == '#')
 				continue;
-			std::string field[4];
+			std::string field[5]; // (shelf v3: an optional 5th field, the image's real path, for multi-disc sets)
 			size_t at = 0;
-			for (int k = 0; k < 4; k++)
+			for (int k = 0; k < 5; k++)
 			{
 				const size_t bar = line.find('|', at);
 				field[k] = line.substr(at, bar == std::string::npos ? std::string::npos : bar - at);
 				at = bar == std::string::npos ? line.size() : bar + 1;
 			}
 			list.push_back(Game(field[0].c_str(), field[1].c_str(), field[2].c_str(), std::strtoull(field[3].c_str(), nullptr, 10)));
+			if (!field[4].empty())
+			{
+				GameInfo& g = list.back();
+				g.path = field[4];
+				g.file = g.path.substr(g.path.rfind('/') + 1);
+				g.stem = g.file.substr(0, g.file.rfind('.'));
+			}
 		}
 		if (list.empty())
 		{
@@ -1087,11 +1192,22 @@ int main(int argc, char** argv)
 	}
 	// 2026-10-08: the shelf's sounds for --record-audio, mixed a frame at a time while recording.
 	Mixer* mixer = nullptr;
-	if (!record_audio.empty())
+	if (!record_audio.empty() || window)
 	{
 		mixer = new Mixer();
+		// FE_HOST_AUDIO_RATE: the audio device's rate for --record-audio (default 48000), to check that pitch and tempo don't
+		// follow the device. FE_HOST_AUDIO_RAW=1: no output conversion (what a mixer that assumed 48 kHz would give that device).
+		if (const char* r = std::getenv("FE_HOST_AUDIO_RATE"))
+			audio_rate = std::atoi(r);
+		if (!std::getenv("FE_HOST_AUDIO_RAW"))
+			mixer->SetOutputRate(audio_rate);
 		mixer->Build();
+		mixer->LoadDir(sounds_dir.empty() ? data + "/console-sounds" : sounds_dir); // ps2-console-shelf: the console sounds, as on the PS5
 		acfg.sound = mixer;
+#ifdef FE_HOST_WINDOW
+		if (window)
+			hw.StartAudio(mixer); // laptop-preview: through the laptop's speakers (SDL pulls Mixer::Mix on its own thread, as the PS5's audio thread does)
+#endif
 	}
 	acfg.build_tag = build_tag;
 	acfg.options = op;
@@ -1264,6 +1380,37 @@ int main(int argc, char** argv)
 	return true;
 	};
 	acfg.drive_disc_reask = [&] { reasks++; };
+	acfg.drive_eject = [&](std::string&) { drive_serial.clear(); return true; }; // shelf v3: the stand-in drive lets the disc go
+	// ps2-console-shelf: --ask: a reask of the drive's disc brings the watcher's question (play it or copy it), as on the console.
+	bool ask_pending = false;
+	int disc_answer = 0; // laptop-preview: the last answer to the disc question (1 copy, 2 play from the disc, 3 not now), 0 once handled
+	if (window)
+		ask_disc = true; // laptop-preview: a disc put in brings the question, as on the console
+	if (ask_disc)
+	{
+		acfg.drive_disc_reask = [&] {
+			reasks++;
+			ask_pending = !drive_serial.empty();
+		};
+		acfg.disc_ask_poll = [&](std::string& title, std::string& serial) {
+			title = drive_title;
+			serial = drive_serial;
+			return ask_pending;
+		};
+		acfg.disc_ask_answer = [&](int answer) {
+			std::printf("[host] disc question answered %d\n", answer);
+			ask_pending = false;
+			disc_answer = answer;
+		};
+	}
+	acfg.start_library = !home; // ps2-console-shelf
+	// ps2-console-shelf: --returning: back from a game (L1 + R1 + Touch): the boot towers, from a made-up play history.
+	if (returning)
+	{
+		acfg.returning = true;
+		for (size_t i = 0; i < games.size(); i++)
+			acfg.play_history.emplace_back(games[i].serial, static_cast<uint64_t>(600 + (i * 7919) % 36000));
+	}
 	if (scan_mode)
 		acfg.scan_progress = [&](int& done, int& total) {
 			done = scan_done;
@@ -1278,9 +1425,14 @@ int main(int argc, char** argv)
 		const std::string by_copy = (serial == drive_serial && !drive_title.empty() ? drive_title : std::string("PS2 disc")) + " (" + serial + ")";
 		return fe::DiscSettingsStem(serial, by_copy, [&](const std::string& stem) { return access((settings_dir + "/" + stem + ".ini").c_str(), F_OK) == 0; });
 	};
+	bool game_step = false;
 	for (const Step& s : steps)
 		if (s.op == "game")
+		{
 			acfg.preselect = std::atoi(s.arg.c_str());
+			SetLastPlayed(acfg, true); // P2-01: "game N" stands for the game played last
+			game_step = true;
+		}
 		else if (s.op == "lastdisc")
 			acfg.preselect_disc_serial = s.arg;
 	if (!app.Init(&renderer, fonts, scan_mode ? std::vector<GameInfo>() : games, covers, acfg))
@@ -1295,7 +1447,9 @@ int main(int argc, char** argv)
 		app.SetWebUrl(web, shown);
 	}
 
-	const double dt = 1.0 / 60.0;
+	// FE_HOST_HZ: the display rate the scripted run steps at (default 60), to check that the shelf runs on real time at any rate.
+	const double host_hz = std::getenv("FE_HOST_HZ") ? std::clamp(std::atof(std::getenv("FE_HOST_HZ")), 10.0, 480.0) : 60.0;
+	const double dt = 1.0 / host_hz;
 	Input in;
 	FrameDesc frame;
 	uint32_t index = 0;
@@ -1305,6 +1459,7 @@ int main(int argc, char** argv)
 	bool rec_on = std::none_of(steps.begin(), steps.end(), [](const Step& st) { return st.op == "rec"; });
 	std::vector<int16_t> audio; // interleaved stereo at SoundBank::kRate
 	std::vector<float> mix(static_cast<size_t>(SoundBank::kRate / 60) * 2);
+	double audio_acc = 0;
 	if (!record.empty())
 	{
 		const std::string cmd = "ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s " + std::to_string(w) + "x" + std::to_string(h) +
@@ -1418,10 +1573,16 @@ int main(int argc, char** argv)
 			flip_top = std::max(flip_top, std::fabs(pose(flip_prev)));
 			flip_low = std::min(flip_low, std::fabs(pose(flip_prev)));
 			app.Build(frame, "21:47");
-			if (mixer)
+			if (mixer && !record_audio.empty())
 			{
-				// Every frame's 1/60 s of sound, kept while recording (the voices play on either way).
-				mixer->Mix(mix.data(), SoundBank::kRate / 60);
+				// Every frame's dt of sound at the device's rate, kept while recording (the voices play on either way).
+				audio_acc += dt * audio_rate;
+				const int nf = static_cast<int>(audio_acc);
+				audio_acc -= nf;
+				if (mix.size() < static_cast<size_t>(nf) * 2)
+					mix.resize(static_cast<size_t>(nf) * 2);
+				mixer->Mix(mix.data(), nf);
+				mix.resize(static_cast<size_t>(nf) * 2);
 				if (rec_on)
 					for (float x : mix)
 						audio.push_back(static_cast<int16_t>(std::lround(std::clamp(x, -1.0f, 1.0f) * 32767.0f)));
@@ -1504,7 +1665,7 @@ int main(int argc, char** argv)
 			{
 				scanning = false;
 				covers->Start(games, fonts, cc, no_download);
-				app.SetGames(games, acfg.preselect);
+				SetGamesCompat(app, games, acfg.preselect, game_step); // P2-01's last_played (laptop-preview: also builds without P2-01)
 			}
 			else
 				std::sscanf(s.arg.c_str(), "%d/%d", &scan_done, &scan_total);
@@ -1546,6 +1707,11 @@ int main(int argc, char** argv)
 				std::this_thread::sleep_for(std::chrono::milliseconds(50));
 				run(dt);
 			}
+		}
+		else if (s.op == "settings") // P2-20b
+		{
+			app.OpenSettingsForAllGames();
+			run(dt);
 		}
 		else if (s.op == "flipreset") // 2.11
 		{
@@ -1673,6 +1839,358 @@ int main(int argc, char** argv)
 				std::printf("[host] %s\n", path.c_str());
 		}
 	}
+#ifdef FE_HOST_WINDOW
+	// laptop-preview: the live window. The shelf runs on the real clock and the window's input until the window is closed. Picking a game (or the
+	// disc's Play) stands for playing it: a moment later the shelf comes back as after L1 + R1 + Touch (the towers, then that game), as the console
+	// relaunches it. P (or the controller's touchpad) does that return at once; D puts a PS2 disc in the drive (the question, then a fake copy).
+	if (window)
+	{
+		std::string disc_serial = disc_spec.substr(0, disc_spec.find('|'));
+		std::string disc_title = disc_spec.find('|') == std::string::npos ? std::string("PS2 disc") : disc_spec.substr(disc_spec.find('|') + 1);
+		std::map<std::string, uint64_t> played; // serial -> seconds played (the towers' heights)
+		for (size_t i = 0; i < games.size(); i++)
+			played[games[i].serial] = 600 + (i * 7919) % 36000;
+		const auto rgba = [](float r, float g, float b, float a) {
+			auto c = [](float v) { return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+			return c(r) | (c(g) << 8) | (c(b) << 16) | (c(a) << 24);
+		};
+		std::string toast;
+		double toast_until = 0, now = 0;
+		auto say = [&](const std::string& t, double secs = 3.5) {
+			toast = t;
+			toast_until = now + secs;
+			std::printf("[window] %s\n", t.c_str());
+		};
+		// A fresh shelf, as the console's relaunch makes one: `back` true is the return from a game (towers, then game `pre`).
+		auto restart = [&](bool back, int pre) {
+			gpu.vk.vkDeviceWaitIdle(gpu.device);
+			app.Shutdown();
+			app.~App();
+			new (&app) App();
+			covers->Stop(); // the old one is left (its images went to the old shelf); a new one hands the covers to the new shelf
+			covers = new CoverService();
+			covers->Start(games, fonts, cc, no_download);
+			AppConfig c = acfg;
+			c.returning = back;
+			c.start_library = false;
+			c.preselect = std::clamp(pre, 0, static_cast<int>(games.size()) - 1);
+			SetLastPlayed(c, back);
+			c.play_history.clear();
+			for (const auto& [serial, secs] : played)
+				c.play_history.emplace_back(serial, secs);
+			if (!app.Init(&renderer, fonts, games, covers, c))
+			{
+				std::fprintf(stderr, "[window] the shelf could not start again: %s\n", renderer.error().c_str());
+				hw.quit = true;
+			}
+		};
+		bool help = false, launched = false, shot = false;
+		double launched_at = 0;
+		int launched_pick = 0;
+		bool dumping = false;
+		double dump_pct = 0, dump_next = 0;
+		auto launch = [&](const std::string& title, const std::string& serial, int pick) {
+			launched = true;
+			launched_at = now;
+			launched_pick = pick;
+			played[serial] += 1800;
+			say("Playing " + title + "  (no emulator here: back to the shelf in a moment, as after L1 + R1 + Touch)", 3.0);
+		};
+		const std::string base_title = "PS2 Shelf Preview" + (label.empty() ? std::string() : "  -  " + label);
+		std::string shown_title;
+		say("F1: keys and controls", 5.0);
+		bool touch_now = false, switch_now = false;
+		auto key_action = [&](SDL_Keycode key, SDL_Keymod mod) {
+			if (key == SDLK_F1)
+				help = !help;
+			else if (key == SDLK_F11 || (key == SDLK_RETURN && (mod & SDL_KMOD_ALT)))
+				hw.ToggleFullscreen();
+			else if (key == SDLK_F12)
+				shot = true;
+			else if (key == SDLK_F2 && !switch_spec.empty())
+				switch_now = true;
+			else if (key == SDLK_F2)
+				say("F2 switches version when started by preview.sh");
+			else if (key == SDLK_Q && (mod & SDL_KMOD_CTRL))
+				hw.quit = true;
+			else if (key == SDLK_P || key == SDLK_SPACE)
+				touch_now = true;
+			else if (key == SDLK_H)
+			{
+				launched = false;
+				restart(false, app.Chosen());
+				say("Started again on Home");
+			}
+			else if (key == SDLK_D)
+			{
+				if (drive_serial.empty())
+				{
+					drive_serial = disc_serial;
+					drive_title = disc_title;
+					ask_pending = true; // the watcher's question, as when a disc goes in while the shelf is open
+					say("PS2 disc in: " + disc_title);
+				}
+				else
+				{
+					drive_serial.clear();
+					ask_pending = false;
+					if (dumping)
+						std::remove(dump_progress.c_str());
+					dumping = false;
+					say("PS2 disc out");
+				}
+			}
+		};
+		// --live: "<seconds> <button or key>; ..." (buttons as the steps name them; keys: d p h f1 f2 f11 f12 quit)
+		struct Live
+		{
+			double at;
+			std::string what;
+		};
+		std::vector<Live> live_steps;
+		{
+			std::istringstream ls(live_spec);
+			for (std::string one; std::getline(ls, one, ';');)
+			{
+				std::istringstream one_s(one);
+				Live l;
+				if (one_s >> l.at >> l.what)
+					live_steps.push_back(l);
+			}
+		}
+		size_t live_next = 0;
+		std::string live_held;
+		double live_release = 0;
+		uint64_t last = SDL_GetTicksNS();
+		double fps_time = 0;
+		int fps_frames = 0, fps = 0;
+		while (!hw.quit)
+		{
+			touch_now = false;
+			SDL_Event e;
+			while (SDL_PollEvent(&e))
+			{
+				switch (e.type)
+				{
+					case SDL_EVENT_QUIT:
+					case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+						hw.quit = true;
+						break;
+					case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+					case SDL_EVENT_WINDOW_RESIZED:
+						hw.resized = true;
+						break;
+					case SDL_EVENT_GAMEPAD_ADDED:
+						hw.PadAdded(e.gdevice.which);
+						say("Controller: " + hw.PadNames());
+						break;
+					case SDL_EVENT_GAMEPAD_REMOVED:
+						hw.PadRemoved(e.gdevice.which);
+						say(hw.pads.empty() ? "Controller gone: keyboard only" : "Controllers: " + hw.PadNames());
+						break;
+					case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+						if (e.gbutton.button == SDL_GAMEPAD_BUTTON_TOUCHPAD)
+							touch_now = true;
+						break;
+					case SDL_EVENT_KEY_DOWN:
+						if (!e.key.repeat)
+							key_action(e.key.key, e.key.mod);
+						break;
+					default:
+						break;
+				}
+			}
+			const uint64_t t = SDL_GetTicksNS();
+			const double frame_dt = std::clamp(static_cast<double>(t - last) * 1e-9, 0.0, 0.1);
+			last = t;
+			now += frame_dt;
+			fps_time += frame_dt;
+			fps_frames++;
+			if (fps_time >= 1.0)
+			{
+				fps = static_cast<int>(std::lround(fps_frames / fps_time));
+				fps_time = 0;
+				fps_frames = 0;
+			}
+			while (live_next < live_steps.size() && live_steps[live_next].at <= now)
+			{
+				const std::string& wv = live_steps[live_next++].what;
+				std::printf("[window] live %.2f: %s\n", now, wv.c_str());
+				if (wv == "d" || wv == "p" || wv == "h" || wv == "f1" || wv == "f2" || wv == "f11" || wv == "f12" || wv == "quit")
+					wv == "quit" ? void(hw.quit = true) :
+					               key_action(wv == "d" ? SDLK_D : wv == "p" ? SDLK_P : wv == "h" ? SDLK_H : wv == "f1" ? SDLK_F1 : wv == "f2" ? SDLK_F2 : wv == "f11" ? SDLK_F11 : SDLK_F12,
+					                   SDL_KMOD_NONE);
+				else
+				{
+					live_held = wv;
+					live_release = now + 0.12;
+				}
+			}
+			if (switch_now)
+			{
+				const std::string cmd = switch_spec.substr(switch_spec.find('|') + 1);
+				std::printf("[window] F2: %s\n", cmd.c_str());
+				std::fflush(stdout);
+				gpu.vk.vkDeviceWaitIdle(gpu.device);
+				hw.Close();
+				execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
+				std::fprintf(stderr, "[window] could not run %s\n", cmd.c_str());
+				return 1;
+			}
+			if (touch_now && !launched)
+			{
+				restart(true, app.Chosen());
+				say("Back from the game (L1 + R1 + Touch)");
+			}
+			// The disc question's answer: a fake copy (about 12 s), or play straight from the disc.
+			if (disc_answer == 1 && !drive_serial.empty())
+			{
+				dumping = true;
+				dump_pct = 0;
+				dump_next = 0;
+				say("Copying " + drive_title + " to the library (a fake copy, about 12 s)");
+			}
+			else if (disc_answer == 2 && !drive_serial.empty())
+				launch(drive_title, drive_serial, app.Chosen());
+			disc_answer = 0;
+			if (dumping && now >= dump_next)
+			{
+				dump_next = now + 0.25;
+				dump_pct = std::min(100.0, dump_pct + 100.0 / 48.0);
+				if (dump_pct < 100.0)
+					WriteText(dump_progress, drive_serial + " " + std::to_string(static_cast<int>(dump_pct)) + "\n" + drive_title + "\n");
+				else
+				{
+					dumping = false;
+					std::remove(dump_progress.c_str());
+					int pick = -1;
+					for (size_t i = 0; i < games.size(); i++)
+						if (games[i].serial == drive_serial)
+							pick = static_cast<int>(i);
+					if (pick < 0)
+					{
+						games.push_back(Game(drive_title.c_str(), drive_serial.compare(2, 2, "ES") == 0 ? "PAL" : "USA", drive_serial.c_str(), 4200)); // laptop-preview: a PAL disc copies as PAL
+						pick = static_cast<int>(games.size()) - 1;
+					}
+					launch(drive_title, drive_serial, pick); // the copy done, the game starts (the console's flow)
+				}
+			}
+			fe::Input live = hw.ReadInput();
+			if (!live_held.empty())
+			{
+				if (now >= live_release)
+					live_held.clear();
+				else if (live_held.compare(0, 5, "stick") == 0)
+					live.rx = 1.0f;
+				else
+					SetButton(live, live_held, true);
+			}
+			app.Update(frame_dt, live);
+			if (tiles)
+				helper.Tick(frame_dt);
+			if (app.Done() && !launched)
+			{
+				if (app.SystemMenuChosen())
+				{
+					launched = true;
+					launched_at = now;
+					launched_pick = app.Chosen();
+					say("The PS2 system menu would start now", 3.0);
+				}
+				else
+				{
+					const int pick = app.Chosen();
+					const GameInfo* g = pick >= 0 && pick < static_cast<int>(games.size()) ? &games[static_cast<size_t>(pick)] : nullptr;
+					launch(g ? g->title : std::string("the game"), g ? g->serial : std::string(), pick);
+				}
+			}
+			if (launched && now - launched_at > 3.0)
+			{
+				launched = false;
+				restart(true, launched_pick);
+			}
+			char clock[16];
+			const std::time_t tt = std::time(nullptr);
+			std::strftime(clock, sizeof clock, "%H:%M", std::localtime(&tt));
+			app.Build(frame, clock);
+			// The overlays: a toast at the top, the key list (F1).
+			const float W = static_cast<float>(w), H = static_cast<float>(h), k = H / 1080.0f;
+			if (now < toast_until && !toast.empty() && !shot) // (F12's picture is the shelf alone)
+			{
+				const float a = static_cast<float>(std::min(1.0, (toast_until - now) / 0.4));
+				const float px = 26.0f * k, tw = fonts->Measure(toast.c_str(), px) + 48.0f * k;
+				Fonts::AddRoundedRect(frame.ui, (W - tw) / 2, 28.0f * k, tw, 52.0f * k, 12.0f * k, rgba(0.02f, 0.03f, 0.08f, 0.82f * a));
+				fonts->AddText(frame.ui, toast.c_str(), W / 2, 28.0f * k + 35.0f * k, px, rgba(0.93f, 0.94f, 0.96f, a), 0.1f, Fonts::Center);
+			}
+			if (help && !shot)
+			{
+				static const char* const rows[][2] = {
+					{"Arrows / left stick", "D-pad"},
+					{"Enter or X", "Cross"},
+					{"Backspace or Esc", "Circle"},
+					{"S", "Square"},
+					{"T", "Triangle"},
+					{"Q / E", "L1 / R1"},
+					{"1 / 3", "L2 / R2"},
+					{"Tab", "Options"},
+					{"R or C", "R3 (holds the case over)"},
+					{"J L  /  I K", "right stick (turns the case)"},
+					{"P, Space / touchpad", "back from a game (L1 + R1 + Touch)"},
+					{"D", "put a PS2 disc in / take it out"},
+					{"H", "start again on Home"},
+					{"F2", "switch version"},
+					{"F11", "fullscreen"},
+					{"F12", "screenshot"},
+					{"F1", "hide this list"},
+					{"Ctrl+Q", "quit"},
+				};
+				const int n = static_cast<int>(sizeof rows / sizeof rows[0]);
+				const float px = 28.0f * k, line = 44.0f * k, pw = 980.0f * k, ph = (n + 3) * line;
+				const float x = (W - pw) / 2, y = (H - ph) / 2;
+				Fonts::AddRoundedRect(frame.ui, 0, 0, W, H, 0, rgba(0, 0, 0.01f, 0.55f));
+				Fonts::AddRoundedRect(frame.ui, x, y, pw, ph, 18.0f * k, rgba(0.03f, 0.05f, 0.12f, 0.94f));
+				fonts->AddText(frame.ui, "Keys (a DualShock 4 / DualSense works as on the PS5)", x + 40 * k, y + line * 1.2f, px, rgba(1.0f, 0.86f, 0.3f, 1), 0.2f);
+				for (int i = 0; i < n; i++)
+				{
+					const float by = y + line * (i + 2.4f);
+					fonts->AddText(frame.ui, rows[i][0], x + 40 * k, by, px, rgba(0.44f, 0.83f, 0.97f, 1), 0.1f);
+					fonts->AddText(frame.ui, rows[i][1], x + 400 * k, by, px, rgba(0.93f, 0.94f, 0.96f, 1), 0.0f);
+				}
+			}
+			if (!renderer.Render(frame, index, VK_NULL_HANDLE, VK_NULL_HANDLE))
+			{
+				std::fprintf(stderr, "[window] render: %s\n", renderer.error().c_str());
+				break;
+			}
+			if (shot)
+			{
+				shot = false;
+				std::vector<uint8_t> px;
+				char name[64];
+				std::strftime(name, sizeof name, "shelf-%Y%m%d-%H%M%S.png", std::localtime(&tt));
+				const std::string path = out + "/" + name;
+				if (renderer.ReadPixels(index, px) && WritePng(path, px, w, h))
+					say("Screenshot: " + path);
+			}
+			if (!hw.Present(gpu.images[index], w, h))
+			{
+				std::fprintf(stderr, "[window] present failed\n");
+				break;
+			}
+			index ^= 1;
+			const std::string title = base_title + (switch_spec.empty() ? "" : "  (F2: " + switch_spec.substr(0, switch_spec.find('|')) + ")") + "  -  " + (hw.pads.empty() ? std::string("keyboard") : hw.PadNames()) + (drive_serial.empty() ? "" : "  -  disc in") +
+			                          "  -  " + std::to_string(fps) + " fps";
+			if (title != shown_title)
+			{
+				hw.SetTitle(title);
+				shown_title = title;
+			}
+		}
+		if (dumping)
+			std::remove(dump_progress.c_str());
+		gpu.vk.vkDeviceWaitIdle(gpu.device);
+	}
+#endif
 	if (rec)
 	{
 		const int rc = pclose(rec);
@@ -1680,7 +2198,7 @@ int main(int argc, char** argv)
 		if (rc != 0)
 			failures++;
 	}
-	if (mixer)
+	if (mixer && !record_audio.empty())
 	{
 		// A plain 16-bit PCM WAV.
 		std::vector<uint8_t> wav;
@@ -1693,8 +2211,8 @@ int main(int argc, char** argv)
 		u32(16);
 		u16(1);
 		u16(2);
-		u32(SoundBank::kRate);
-		u32(SoundBank::kRate * 4);
+		u32(static_cast<uint32_t>(audio_rate));
+		u32(static_cast<uint32_t>(audio_rate) * 4);
 		u16(4);
 		u16(16);
 		wav.insert(wav.end(), {'d', 'a', 't', 'a'});
@@ -1703,7 +2221,7 @@ int main(int argc, char** argv)
 		wav.insert(wav.end(), pcm, pcm + bytes);
 		std::ofstream f(record_audio, std::ios::binary);
 		f.write(reinterpret_cast<const char*>(wav.data()), static_cast<std::streamsize>(wav.size()));
-		std::printf("[host] recorded %.2f s of the shelf's sounds to %s\n", static_cast<double>(audio.size() / 2) / SoundBank::kRate,
+		std::printf("[host] recorded %.2f s of the shelf's sounds to %s\n", static_cast<double>(audio.size() / 2) / audio_rate,
 			record_audio.c_str());
 		if (!f)
 			failures++;
@@ -1714,5 +2232,9 @@ int main(int argc, char** argv)
 		delete packs;
 	app.Shutdown();
 	renderer.Shutdown();
+#ifdef FE_HOST_WINDOW
+	if (window)
+		hw.Close();
+#endif
 	return failures ? 1 : 0;
 }

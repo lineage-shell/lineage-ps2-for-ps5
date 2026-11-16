@@ -28,8 +28,9 @@ run() {
     failed=1
   fi
 }
-to_update=("game 2" "wait 1" "press square" "wait 0.4" "press r1" "wait 0.3" "press down 70" "press up" "press up" "wait 0.2")
-to_logs=("game 2" "wait 1" "press square" "wait 0.4" "press r1" "wait 0.3" "press down 70" "press up" "wait 0.2")
+# P2-20: the rows are in the System section (second from last), above its last row (Web Settings).
+to_update=("game 2" "wait 1" "press square" "wait 0.4" "settings" "wait 0.3" "press down 70" "press up" "press cross" "wait 0.1" "press down 70" "press up" "press up" "wait 0.2")
+to_logs=("game 2" "wait 1" "press square" "wait 0.4" "settings" "wait 0.3" "press down 70" "press up" "press cross" "wait 0.1" "press down 70" "press up" "wait 0.2")
 # UpdateStatus::State: 0 idle, 2 current, 3 newer, 4 available, 5 failed, 8 started, 9 the installer didn't start
 run available --updates vk-285-181 "${to_update[@]}" "expect updstate=0" "shot update-idle" "press cross" "wait 1" "expect updstate=4" \
   "shot update-available" "press cross" "wait 0.3" "expect updstarted=0" "shot update-armed" "press cross" "wait 0.3" "expect updstarted=1" \

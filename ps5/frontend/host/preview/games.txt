@@ -1,0 +1,50 @@
+# laptop-preview: the sample library, PAL releases (title|region|serial|size in MB; titles from GameIndex.yaml), fe_host --games.
+# Fronts: fetch_covers.py (xlenore/ps2-covers, local only); make_covers.py paints the backs and any front the set lacks. No real art in git.
+God of War|PAL|SCES-53133|3712
+God of War II|PAL|SCES-54206|8300
+Ratchet & Clank|PAL|SCES-50916|3350
+Ratchet & Clank 2 - Locked and Loaded|PAL|SCES-51607|3900
+Jak and Daxter - The Precursor Legacy|PAL|SCES-50361|3200
+Jak II - Renegade|PAL|SCES-51608|4100
+Sly Raccoon|PAL|SCES-50917|2300
+Gran Turismo 4|PAL|SCES-51719|7680
+Gran Turismo 3 - A-Spec|PAL|SCES-50294|2900
+Castlevania|PAL|SLES-52118|2860
+The Lord of the Rings - The Two Towers|PAL|SLES-51252|2410
+Shadow of the Colossus|PAL|SCES-53326|3500
+Ico|PAL|SCES-50760|1500
+Metal Gear Solid 2 - Sons of Liberty|PAL|SLES-50383|4300
+Metal Gear Solid 3 - Snake Eater|PAL|SLES-82013|4300
+Final Fantasy X|PAL|SCES-50490|3900
+Final Fantasy XII|PAL|SLES-54354|3300
+Kingdom Hearts|PAL|SCES-50967|3200
+Kingdom Hearts II|PAL|SLES-54114|4200
+Dragon Quest VIII - Journey of the Cursed King|PAL|SLES-53974|4100
+Shin Megami Tensei - Persona 4|PAL|SLES-55474|4000
+Okami|PAL|SLES-54439|4300
+Devil May Cry 3 - Dante's Awakening|PAL|SLES-53038|4200
+Resident Evil 4|PAL|SLES-53702|4200
+Silent Hill 2|PAL|SLES-50382|1800
+Burnout 3 - Takedown|PAL|SLES-52584|3600
+Need for Speed - Underground 2|PAL|SLES-52725|4100
+Tony Hawk's Pro Skater 3|PAL|SLES-50435|600
+SSX 3|PAL|SLES-51697|2600
+Grand Theft Auto - San Andreas|PAL|SLES-52541|4500
+Grand Theft Auto - Vice City|PAL|SLES-51061|2900
+We Love Katamari|PAL|SLES-53828|600
+Tekken 5|PAL|SCES-53202|3800
+SoulCalibur II|PAL|SLES-51799|2100
+TimeSplitters 2|PAL|SLES-50877|700
+Beyond Good & Evil|PAL|SLES-51917|3200
+Prince of Persia - The Sands of Time|PAL|SLES-51918|3400
+Crash Bandicoot - The Wrath of Cortex|PAL|SLES-50386|1600
+Ace Combat - Distant Thunder|PAL|SCES-50410|2700
+Zone of the Enders - The 2nd Runner Special Edition|PAL|SLES-51113|3500
+Rez|PAL|SCES-50501|500
+Canis Canem Edit|PAL|SLES-53561|4300
+Guitar Hero II|PAL|SLES-54442|4300
+Dark Chronicle|PAL|SCES-51190|3800
+Star Wars - Battlefront II|PAL|SLES-53501|3800
+Ape Escape 2|PAL|SCES-50885|1600
+Spyro - Enter the Dragonfly|PAL|SLES-51043|1500
+Onimusha - Warlords|PAL|SLES-50247|3100

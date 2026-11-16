@@ -3,6 +3,7 @@
 # flip it and see the back in the shelf"): the shelf's search and the case turning over, in fe_host (SwiftShader or lavapipe stands in for the
 # GPU). The 5 host games: God of War (USA, SCUS-97399), Ratchet & Clank (Europe, SCES-50916), Gran Turismo 4 (USA, SCUS-97328),
 # Castlevania - Lament of Innocence (USA, SLUS-20733), The Lord of the Rings - The Two Towers (USA, SLUS-20578).
+#   - P2-22: new results start on the first match; the search cleared brings back the game picked before it;
 #   - R2 opens the panel's keyboard (the host has no PS5 one); each key narrows the shelf; Circle closes the keyboard (the search stays) and,
 #     on the shelf, clears the search; Triangle clears it on the keyboard;
 #   - the settings page's box sets and clears it ("remote"); every word must match (title, serial, region, file name, any case);
@@ -69,7 +70,12 @@ run keyboard-types "game 0" "wait 1" "expect shelf=5" "press r2" "wait 0.5" "exp
 # "war": w (row 2, col 1 of qwertyuiop), a (asdf row), r (qwerty row col 3): Cross each; God of War is the only one.
 run keyboard-word "game 3" "wait 1" "press r2" "wait 0.5" "press right" "press cross" "press down" "press left" "press cross" "press up" "press right 3" \
   "press cross" "wait 0.3" "expect searchlen=3" "expect shelf=1" "expect selected=0" "press circle" "wait 0.3" "expect typing=0" "expect shelf=1" \
-  "shot search-war" "press circle" "wait 0.3" "expect shelf=5" "expect selected=0" "expect searchlen=0"
+  "shot search-war" "press circle" "wait 0.3" "expect shelf=5" "expect selected=3" "expect searchlen=0"
+# P2-22 (kurolume: "when we search, it should show all the searches" and "if we delete everything, it should put us back where we were"): new results
+# start on the first match (the shelf's top), and the search cleared (deleted, Triangle, or Circle on the shelf) brings back the game picked before it.
+run results-from-top "game 3" "wait 1" "remote usa" "wait 0.3" "expect shelf=4" "expect selected=0" "remote usa slus" "wait 0.3" "expect selected=3" \
+  "remote" "wait 0.3" "expect shelf=5" "expect selected=3" "press right" "wait 0.3" "expect selected=4" "press r2" "wait 0.5" "press right 4" "press cross" \
+  "wait 0.3" "expect selected=1" "press square" "wait 0.3" "expect searchlen=0" "expect selected=4"
 # Words: all of them must match. "usa" 4, "usa slus" 2, "of" 3 (title text), "zzz" none (the shelf says so).
 run remote-words "game 0" "wait 1" "remote usa" "wait 0.3" "expect shelf=4" "remote USA SLUS" "wait 0.3" "expect shelf=2" "remote of" "wait 0.3" "expect shelf=3" \
   "remote scus-97" "wait 0.3" "expect shelf=2" "remote scus97" "wait 0.3" "expect shelf=2" "remote zzz" "wait 0.3" "expect shelf=0" "shot search-none" \
