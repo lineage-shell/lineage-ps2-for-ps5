@@ -2,7 +2,7 @@
 
 # Lineage PS2 for PS5
 
-Welcome to **Lineage**, my attempt at a faithful interface for emulators. Right now that's this and the [PS1 version](https://github.com/lineage-shell/lineage-ps1-for-ps5), both on PS5. In the future, I'd like to run the same design across PC emulators, from one shared core. There's a lot of research and QA before we get there though!
+Hi, I'm kurolume :wave: Welcome to **Lineage**, my attempt at a faithful interface for emulators. Right now that's this and the [PS1 version](https://github.com/lineage-shell/lineage-ps1-for-ps5), both on PS5. In the future, I'd like to run the same design across PC emulators, from one shared core. There's a lot of research and QA before we get there though!
 
 ## The PS2's own menu, back on your PS5
 
@@ -10,7 +10,12 @@ This is a front end for [PS5SX2](https://github.com/Swordpdf/PS5SX2) that looks 
 
 None of Sony's stuff is in here. The artwork, fonts and sounds all come from your own BIOS when the app starts.
 
-> Screenshots and a video are on the release page and in the announcement post. They're not in the repo because they show artwork from a Sony BIOS.
+<table>
+<tr><td><img src="docs/screenshots/01-opening.jpg" width="100%" alt="The opening"><br><sub>The opening</sub></td><td><img src="docs/screenshots/02-main-menu.jpg" width="100%" alt="Main menu"><br><sub>Main menu</sub></td><td><img src="docs/screenshots/03-browser.jpg" width="100%" alt="Browser"><br><sub>Browser</sub></td></tr>
+<tr><td><img src="docs/screenshots/04-memory-card.jpg" width="100%" alt="Memory card"><br><sub>Memory card</sub></td><td><img src="docs/screenshots/05-library.jpg" width="100%" alt="Library"><br><sub>Library</sub></td><td><img src="docs/screenshots/06-game-page.jpg" width="100%" alt="Game page and Play choice"><br><sub>Game page and Play choice</sub></td></tr>
+</table>
+
+Video: see the [v1.0 release](../../releases/tag/v1.0).
 
 ## Features
 
