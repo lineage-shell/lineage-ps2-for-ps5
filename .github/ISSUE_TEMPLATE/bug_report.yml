@@ -1,0 +1,35 @@
+name: Bug report
+description: Something isn't working right
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: input
+    id: bios
+    attributes:
+      label: BIOS version
+      placeholder: e.g. SCPH-70004 v2.00 (PAL)
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: PS5 firmware
+      placeholder: e.g. 11.40
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game (if it's game-specific)
+      placeholder: Title and serial, e.g. SLES-50330
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, videos or logs help a lot.
