@@ -11,8 +11,8 @@ This is a front end for [PS5SX2](https://github.com/Swordpdf/PS5SX2) that looks 
 None of Sony's stuff is in here. The artwork, fonts and sounds all come from your own BIOS when the app starts.
 
 <table>
-<tr><td><img src="docs/screenshots/01-opening.jpg" width="100%" alt="The opening"><br><sub>The opening</sub></td><td><img src="docs/screenshots/02-main-menu.jpg" width="100%" alt="Main menu"><br><sub>Main menu</sub></td><td><img src="docs/screenshots/03-browser.jpg" width="100%" alt="Browser"><br><sub>Browser</sub></td></tr>
-<tr><td><img src="docs/screenshots/04-memory-card.jpg" width="100%" alt="Memory card"><br><sub>Memory card</sub></td><td><img src="docs/screenshots/05-library.jpg" width="100%" alt="Library"><br><sub>Library</sub></td><td><img src="docs/screenshots/06-game-page.jpg" width="100%" alt="Game page and Play choice"><br><sub>Game page and Play choice</sub></td></tr>
+<tr><td><img src="docs/screenshots/01-opening.jpg?v=3" width="100%" alt="The opening"><br><sub>The opening</sub></td><td><img src="docs/screenshots/02-main-menu.jpg?v=3" width="100%" alt="Main menu"><br><sub>Main menu</sub></td><td><img src="docs/screenshots/03-browser.jpg?v=3" width="100%" alt="Browser"><br><sub>Browser</sub></td></tr>
+<tr><td><img src="docs/screenshots/04-memory-card.jpg?v=3" width="100%" alt="Memory card"><br><sub>Memory card</sub></td><td><img src="docs/screenshots/05-library.jpg?v=3" width="100%" alt="Library"><br><sub>Library</sub></td><td><img src="docs/screenshots/06-game-page.jpg?v=3" width="100%" alt="Game page and Play choice"><br><sub>Game page and Play choice</sub></td></tr>
 </table>
 
 Video: see the [v1.0 release](../../releases/tag/v1.0).
