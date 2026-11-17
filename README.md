@@ -2,9 +2,7 @@
 
 # Lineage PS2 for PS5
 
-Hi, I'm kurolume :wave: I grew up on the PS1 and PS2. I've got a family of my own now, and after years of min-maxing life I'm learning to slow down and enjoy things. This project came out of that: the menus and ethos I remember, kept faithful, with just enough added to show off a library and dive back into the good times.
-
-So welcome to **Lineage**, my attempt at a faithful interface for emulators. Right now that's this and the [PS1 version](https://github.com/lineage-shell/lineage-ps1-for-ps5), both on PS5. In the future, I'd like to run the same design across PC emulators, from one shared core. There's a lot of research and QA before we get there though!
+Welcome to **Lineage**, my attempt at a faithful interface for emulators. Right now that's this and the [PS1 version](https://github.com/lineage-shell/lineage-ps1-for-ps5), both on PS5. In the future, I'd like to run the same design across PC emulators, from one shared core. There's a lot of research and QA before we get there though!
 
 ## The PS2's own menu, back on your PS5
 
